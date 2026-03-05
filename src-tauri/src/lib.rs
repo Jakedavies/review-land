@@ -199,6 +199,28 @@ async fn get_pr_head_sha(
     github::fetch_pr_head_sha(&owner, &repo, pr_number, &token).await
 }
 
+#[tauri::command]
+async fn proxy_image(url: String, token: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "pr-review-land")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/png")
+        .to_string();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{content_type};base64,{b64}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -220,6 +242,7 @@ pub fn run() {
             get_inline_comments,
             post_inline_comment,
             get_pr_head_sha,
+            proxy_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

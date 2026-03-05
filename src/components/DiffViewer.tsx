@@ -2,6 +2,7 @@ import { For, Show, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { createHighlighter, type Highlighter } from "shiki";
 import CommentBox, { type Collaborator } from "./CommentBox";
+import CommentBody from "./CommentBody";
 
 let highlighterInstance: Highlighter | null = null;
 let highlighterPromise: Promise<Highlighter> | null = null;
@@ -293,9 +294,7 @@ function HighlightedLine(props: {
                     {new Date(comment.created_at).toLocaleDateString()}
                   </span>
                 </div>
-                <div class="text-gray-300 whitespace-pre-wrap">
-                  {comment.body}
-                </div>
+                <CommentBody body={comment.body} class="text-gray-300 whitespace-pre-wrap text-xs" />
               </div>
             )}
           </For>

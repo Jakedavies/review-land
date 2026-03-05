@@ -7,6 +7,7 @@ import FileTree from "../components/FileTree";
 import ReviewPanel from "../components/ReviewPanel";
 import CommentBox, { type Collaborator } from "../components/CommentBox";
 import { usePRData } from "../PRDataContext";
+import CommentBody from "../components/CommentBody";
 
 interface AppSettings {
   github_token: string;
@@ -263,9 +264,7 @@ function DiffPage() {
           </button>
           <Show when={descOpen() && matchedPr!.body}>
             <div class="px-3 pb-3 border-t border-gray-800 pt-2">
-              <pre class="text-sm text-gray-300 whitespace-pre-wrap font-sans">
-                {matchedPr!.body}
-              </pre>
+              <CommentBody body={matchedPr!.body!} class="text-sm text-gray-300 whitespace-pre-wrap font-sans" />
             </div>
           </Show>
         </div>
@@ -342,9 +341,7 @@ function DiffPage() {
                           </div>
                           <Show when={item.kind === "comment" ? item.body : item.kind === "review" ? item.body : undefined}>
                             {(body) => (
-                              <div class="text-sm text-gray-300 whitespace-pre-wrap">
-                                {body()}
-                              </div>
+                              <CommentBody body={body()} />
                             )}
                           </Show>
                         </div>
