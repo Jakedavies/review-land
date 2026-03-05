@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+.shiki-line span {
+  font-weight: normal !important;
+}
