@@ -45,13 +45,11 @@ function DiffPage() {
   const [collaborators, setCollaborators] = createSignal<Collaborator[]>([]);
 
   // Review modal state
-  type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
   const [reviewModalOpen, setReviewModalOpen] = createSignal(false);
-  const [reviewModalEvent, setReviewModalEvent] = createSignal<ReviewEvent>("COMMENT");
   const [reviewModalBody, setReviewModalBody] = createSignal("");
   const [reviewModalSubmitting, setReviewModalSubmitting] = createSignal(false);
   const [reviewModalResult, setReviewModalResult] = createSignal<"success" | "error" | null>(null);
-  const [reviewModalErrorMsg, setReviewModalErrorMsg] = createSignal("");
+  const [reviewModalResultMsg, setReviewModalResultMsg] = createSignal("");
 
   let prDataAvailable = false;
   let matchedPr: ReturnType<typeof usePRData>["prs"] extends () => (infer T)[]
@@ -207,21 +205,28 @@ function DiffPage() {
     }
   };
 
-  const handleReviewModalSubmit = async () => {
-    if (reviewModalEvent() === "REQUEST_CHANGES" && !reviewModalBody().trim()) return;
+  const submitModalReview = async (event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES") => {
+    const text = reviewModalBody().trim();
+    if (event === "REQUEST_CHANGES" && !text) return;
+
     setReviewModalSubmitting(true);
     setReviewModalResult(null);
-    setReviewModalErrorMsg("");
+    setReviewModalResultMsg("");
     try {
       await invoke("submit_review", {
         owner: params.owner,
         repo: params.repo,
         prNumber: prNumber(),
-        event: reviewModalEvent(),
-        body: reviewModalBody(),
+        event,
+        body: text,
         token: token(),
       });
       setReviewModalResult("success");
+      setReviewModalResultMsg(
+        event === "APPROVE" ? "Approved!" :
+        event === "REQUEST_CHANGES" ? "Changes requested!" :
+        "Review submitted!"
+      );
       setReviewModalBody("");
       setTimeout(() => {
         setReviewModalOpen(false);
@@ -229,7 +234,7 @@ function DiffPage() {
       }, 1200);
     } catch (e) {
       setReviewModalResult("error");
-      setReviewModalErrorMsg(`${e}`);
+      setReviewModalResultMsg(`${e}`);
     } finally {
       setReviewModalSubmitting(false);
     }
@@ -245,12 +250,6 @@ function DiffPage() {
     onCleanup(() => window.removeEventListener("keydown", handleEscKey));
   }
 
-  const reviewHeaderButtons: { label: string; value: ReviewEvent; activeColor: string }[] = [
-    { label: "Comment", value: "COMMENT", activeColor: "bg-gray-700 text-white" },
-    { label: "Approve", value: "APPROVE", activeColor: "bg-green-900 text-green-300" },
-    { label: "Request Changes", value: "REQUEST_CHANGES", activeColor: "bg-red-900 text-red-300" },
-  ];
-
   return (
     <div>
       <div class="flex items-center gap-3 mb-4 sticky top-[-12px] z-20 bg-gray-950 pb-2 -mx-3 px-3 -mt-3 pt-3">
@@ -264,27 +263,20 @@ function DiffPage() {
           {params.owner}/{params.repo}#{params.number}
         </h2>
         <Show when={token()}>
-          <div class="flex gap-1.5">
-            <For each={reviewHeaderButtons}>
-              {(btn) => (
-                <button
-                  class={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                    reviewModalOpen() && reviewModalEvent() === btn.value
-                      ? btn.activeColor
-                      : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-                  }`}
-                  onClick={() => {
-                    setReviewModalEvent(btn.value);
-                    setReviewModalOpen(true);
-                    setReviewModalResult(null);
-                    setReviewModalErrorMsg("");
-                  }}
-                >
-                  {btn.label}
-                </button>
-              )}
-            </For>
-          </div>
+          <button
+            class={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              reviewModalOpen()
+                ? "bg-green-900 text-green-300"
+                : "bg-gray-900 border border-gray-700 text-gray-300 hover:bg-gray-800"
+            }`}
+            onClick={() => {
+              setReviewModalOpen(true);
+              setReviewModalResult(null);
+              setReviewModalResultMsg("");
+            }}
+          >
+            Submit Review
+          </button>
         </Show>
         <button
           onClick={() => openUrl(ghUrl())}
@@ -435,63 +427,50 @@ function DiffPage() {
           }}
         >
           <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg p-4 space-y-3">
-            <div class="flex items-center justify-between">
-              <h3 class="text-sm font-semibold text-gray-200">
-                Submit Review
-              </h3>
-              <div class="flex gap-1.5">
-                <For each={reviewHeaderButtons}>
-                  {(btn) => (
-                    <button
-                      class={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                        reviewModalEvent() === btn.value
-                          ? `${btn.activeColor} border-transparent`
-                          : "border-gray-600 text-gray-400 hover:text-gray-200"
-                      }`}
-                      onClick={() => setReviewModalEvent(btn.value)}
-                    >
-                      {btn.label}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
+            <h3 class="text-sm font-semibold text-gray-200">Submit Review</h3>
             <MentionTextarea
               value={reviewModalBody}
               onValueChange={setReviewModalBody}
-              placeholder={
-                reviewModalEvent() === "APPROVE"
-                  ? "Optional review comment..."
-                  : "Review comment..."
-              }
+              placeholder="Review comment..."
               disabled={reviewModalSubmitting()}
               collaborators={collaborators()}
               class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2 text-sm text-gray-200 placeholder-gray-500 resize-y min-h-[80px] focus:outline-none focus:border-blue-600"
             />
-            <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2">
               <button
-                onClick={handleReviewModalSubmit}
-                disabled={
-                  reviewModalSubmitting() ||
-                  (reviewModalEvent() === "REQUEST_CHANGES" && !reviewModalBody().trim())
-                }
-                class="px-4 py-1.5 rounded-lg text-sm font-medium bg-blue-700 text-white hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => submitModalReview("COMMENT")}
+                disabled={reviewModalSubmitting()}
+                class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 text-white hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {reviewModalSubmitting() ? "Submitting..." : "Submit Review"}
+                Comment
+              </button>
+              <button
+                onClick={() => submitModalReview("APPROVE")}
+                disabled={reviewModalSubmitting()}
+                class="px-3 py-1.5 rounded-lg text-xs font-medium bg-green-800 text-green-200 hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => submitModalReview("REQUEST_CHANGES")}
+                disabled={reviewModalSubmitting() || !reviewModalBody().trim()}
+                class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-800 text-red-200 hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Request Changes
               </button>
               <button
                 onClick={() => setReviewModalOpen(false)}
-                class="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-gray-200 transition-colors"
+                class="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-gray-200 transition-colors ml-auto"
               >
                 Cancel
               </button>
-              <Show when={reviewModalResult() === "success"}>
-                <span class="text-xs text-green-400">Review submitted!</span>
-              </Show>
-              <Show when={reviewModalResult() === "error"}>
-                <span class="text-xs text-red-400">{reviewModalErrorMsg()}</span>
-              </Show>
             </div>
+            <Show when={reviewModalResult() === "success"}>
+              <span class="text-xs text-green-400">{reviewModalResultMsg()}</span>
+            </Show>
+            <Show when={reviewModalResult() === "error"}>
+              <span class="text-xs text-red-400">{reviewModalResultMsg()}</span>
+            </Show>
           </div>
         </div>
       </Show>
