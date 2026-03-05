@@ -126,6 +126,7 @@ export interface InlineComment {
 
 interface DiffViewerProps {
   files: PrFile[];
+  activeFile?: string;
   owner?: string;
   repo?: string;
   prNumber?: number;
@@ -431,6 +432,11 @@ function DiffViewer(props: DiffViewerProps) {
   const totalDeletions = () =>
     props.files.reduce((s, f) => s + f.deletions, 0);
 
+  const displayFiles = () =>
+    props.activeFile
+      ? props.files.filter((f) => f.filename === props.activeFile)
+      : props.files;
+
   return (
     <div class="space-y-2 mt-2">
       <div class="text-xs text-gray-400">
@@ -439,7 +445,7 @@ function DiffViewer(props: DiffViewerProps) {
         <span class="text-green-400">+{totalAdditions()}</span>{" "}
         <span class="text-red-400">-{totalDeletions()}</span>
       </div>
-      <For each={props.files}>
+      <For each={displayFiles()}>
         {(file) => (
           <FileSection
             file={file}

@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import DiffViewer, { type PrFile, type InlineComment } from "../components/DiffViewer";
-import FileTree from "../components/FileTree";
+import FileTree, { type FileViewEntry } from "../components/FileTree";
 import ThreadReplyBox from "../components/ThreadReplyBox";
 import { type Collaborator } from "../components/CommentBox";
 import MentionTextarea from "../components/MentionTextarea";
@@ -43,6 +43,53 @@ function DiffPage() {
   const [comments, setComments] = createSignal<IssueComment[]>([]);
   const [reviews, setReviews] = createSignal<ReviewComment[]>([]);
   const [collaborators, setCollaborators] = createSignal<Collaborator[]>([]);
+  const [activeFileIndex, setActiveFileIndex] = createSignal(0);
+  const [viewedFiles, setViewedFiles] = createSignal<Record<string, FileViewEntry>>({});
+
+  const activeFile = () => files()[activeFileIndex()]?.filename;
+
+  const markFileViewed = async (filename: string) => {
+    const file = files().find((f) => f.filename === filename);
+    if (!file) return;
+    try {
+      await invoke("mark_file_viewed", {
+        owner: params.owner,
+        repo: params.repo,
+        prNumber: prNumber(),
+        filename,
+        sha: file.sha,
+      });
+      setViewedFiles((prev) => ({
+        ...prev,
+        [filename]: { sha: file.sha },
+      }));
+    } catch (e) {
+      console.error("Failed to mark file viewed:", e);
+    }
+  };
+
+  const selectFile = (filename: string) => {
+    const idx = files().findIndex((f) => f.filename === filename);
+    if (idx >= 0) {
+      setActiveFileIndex(idx);
+      markFileViewed(filename);
+    }
+  };
+
+  const goNextFile = () => {
+    const len = files().length;
+    if (len === 0) return;
+    const next = Math.min(activeFileIndex() + 1, len - 1);
+    setActiveFileIndex(next);
+    markFileViewed(files()[next].filename);
+  };
+
+  const goPrevFile = () => {
+    if (files().length === 0) return;
+    const prev = Math.max(activeFileIndex() - 1, 0);
+    setActiveFileIndex(prev);
+    markFileViewed(files()[prev].filename);
+  };
 
   // Review modal state
   const [reviewModalOpen, setReviewModalOpen] = createSignal(false);
@@ -151,6 +198,30 @@ function DiffPage() {
       setComments(topComments);
       setReviews(prReviews);
 
+      // Fetch file viewed state
+      let viewed: Record<string, FileViewEntry> = {};
+      try {
+        viewed = await invoke<Record<string, FileViewEntry>>("get_files_viewed", {
+          owner: params.owner,
+          repo: params.repo,
+          prNumber: prNumber(),
+        });
+        setViewedFiles(viewed);
+      } catch (e) {
+        console.error("Failed to fetch file viewed state:", e);
+      }
+
+      // Default to first unviewed file, or first file if all viewed
+      if (result.length > 0) {
+        const firstUnviewed = result.findIndex((f) => {
+          const entry = viewed[f.filename];
+          return !entry || entry.sha !== f.sha;
+        });
+        const startIdx = firstUnviewed >= 0 ? firstUnviewed : 0;
+        setActiveFileIndex(startIdx);
+        markFileViewed(result[startIdx].filename);
+      }
+
       // Fetch collaborators for @mention autocomplete
       try {
         const collabs = await invoke<Collaborator[]>("get_collaborators", {
@@ -240,14 +311,38 @@ function DiffPage() {
     }
   };
 
-  const handleEscKey = (e: KeyboardEvent) => {
+  const handleKeydown = (e: KeyboardEvent) => {
     if (e.key === "Escape" && reviewModalOpen()) {
       setReviewModalOpen(false);
+      return;
+    }
+    // Skip keybinds when typing in an input/textarea
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) return;
+
+    if (e.key === "n") {
+      e.preventDefault();
+      goNextFile();
+    } else if (e.key === "p") {
+      e.preventDefault();
+      goPrevFile();
+    } else {
+      const scroller = document.querySelector("main");
+      if (!scroller) return;
+      if (e.key === "j") {
+        scroller.scrollBy({ top: 60 });
+      } else if (e.key === "k") {
+        scroller.scrollBy({ top: -60 });
+      } else if (e.key === "G") {
+        scroller.scrollTo({ top: scroller.scrollHeight });
+      } else if (e.key === "g") {
+        scroller.scrollTo({ top: 0 });
+      }
     }
   };
   if (typeof window !== "undefined") {
-    window.addEventListener("keydown", handleEscKey);
-    onCleanup(() => window.removeEventListener("keydown", handleEscKey));
+    window.addEventListener("keydown", handleKeydown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeydown));
   }
 
   return (
@@ -400,11 +495,38 @@ function DiffPage() {
       <Show when={!loading() && !error()}>
         <div class="flex gap-3 items-start">
           <div class="w-56 flex-shrink-0 sticky top-[36px] max-h-[calc(100vh-48px)] overflow-y-auto">
-            <FileTree files={files()} />
+            <FileTree
+              files={files()}
+              activeFile={activeFile()}
+              viewedFiles={viewedFiles()}
+              onSelectFile={selectFile}
+            />
           </div>
           <div class="flex-1 min-w-0 space-y-4">
+            <div class="flex items-center gap-2">
+              <button
+                onClick={goPrevFile}
+                disabled={activeFileIndex() === 0}
+                class="px-2 py-1 rounded text-xs font-medium bg-gray-900 border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Previous file (p)"
+              >
+                &larr; Prev
+              </button>
+              <span class="text-xs text-gray-500">
+                {activeFileIndex() + 1} / {files().length}
+              </span>
+              <button
+                onClick={goNextFile}
+                disabled={activeFileIndex() >= files().length - 1}
+                class="px-2 py-1 rounded text-xs font-medium bg-gray-900 border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Next file (n)"
+              >
+                Next &rarr;
+              </button>
+            </div>
             <DiffViewer
               files={files()}
+              activeFile={activeFile()}
               owner={params.owner}
               repo={params.repo}
               prNumber={prNumber()}

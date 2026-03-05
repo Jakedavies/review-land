@@ -2,7 +2,8 @@ mod github;
 mod storage;
 
 use chrono::Utc;
-use storage::{AppSettings, RepoConfig, ViewState};
+use std::collections::HashMap;
+use storage::{AppSettings, FileViewEntry, RepoConfig, ViewState};
 
 // --- Settings commands ---
 
@@ -30,6 +31,45 @@ async fn mark_pr_viewed(pr_url: String) -> Result<(), String> {
         .last_viewed
         .insert(pr_url, Utc::now().to_rfc3339());
     storage::write_view_state(&state).await
+}
+
+// --- File viewed state commands ---
+
+#[tauri::command]
+async fn mark_file_viewed(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    filename: String,
+    sha: String,
+) -> Result<(), String> {
+    let mut state = storage::read_view_state().await?;
+    let key = format!("{owner}/{repo}/{pr_number}/{filename}");
+    state.file_viewed.insert(
+        key,
+        FileViewEntry {
+            sha,
+            viewed_at: Utc::now().to_rfc3339(),
+        },
+    );
+    storage::write_view_state(&state).await
+}
+
+#[tauri::command]
+async fn get_files_viewed(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+) -> Result<HashMap<String, FileViewEntry>, String> {
+    let state = storage::read_view_state().await?;
+    let prefix = format!("{owner}/{repo}/{pr_number}/");
+    let filtered: HashMap<String, FileViewEntry> = state
+        .file_viewed
+        .into_iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, v)| (k[prefix.len()..].to_string(), v))
+        .collect();
+    Ok(filtered)
 }
 
 // --- GitHub commands ---
@@ -230,6 +270,8 @@ pub fn run() {
             save_settings,
             get_last_viewed,
             mark_pr_viewed,
+            mark_file_viewed,
+            get_files_viewed,
             get_github_user,
             get_collaborators,
             get_open_prs,

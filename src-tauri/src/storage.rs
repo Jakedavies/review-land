@@ -27,11 +27,20 @@ pub struct AppSettings {
     pub refresh_interval_secs: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileViewEntry {
+    pub sha: String,
+    pub viewed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ViewState {
     /// Maps PR URL to the last time the user viewed it (ISO 8601)
     #[serde(default)]
     pub last_viewed: HashMap<String, String>,
+    /// Maps "{owner}/{repo}/{pr_number}/{filename}" to viewed state
+    #[serde(default)]
+    pub file_viewed: HashMap<String, FileViewEntry>,
 }
 
 fn data_dir() -> PathBuf {
