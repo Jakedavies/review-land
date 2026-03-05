@@ -1,7 +1,16 @@
-# Tauri + Solid + Typescript
+## UI for reviewing Github PR's 
 
-This template should help get you started developing with Tauri, Solid and Typescript in Vite.
+Disclaimer: this is very much vibed and I haven't read much of the code :( 
 
-## Recommended IDE Setup
+This is built for my specific review workflow without the overhead or performance inconsistency of Github's built in review UI.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+### Dev
+
+`bun install`
+
+`bun run tauri dev`
+
+
+### Prod build
+
+`bun run tauri build`
