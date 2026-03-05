@@ -104,6 +104,8 @@ function ProxiedImage(props: { src: string; alt: string }) {
   );
 }
 
+const isSafeUrl = (url: string) => /^https?:\/\//i.test(url);
+
 function CommentBody(props: { body: string; class?: string }) {
   const segments = () => parseComment(props.body);
 
@@ -113,13 +115,17 @@ function CommentBody(props: { body: string; class?: string }) {
         {(seg) => {
           switch (seg.kind) {
             case "img":
-              return <ProxiedImage src={seg.src} alt={seg.alt} />;
+              return isSafeUrl(seg.src)
+                ? <ProxiedImage src={seg.src} alt={seg.alt} />
+                : <span class="text-gray-500 text-xs">[image]</span>;
             case "link":
-              return (
-                <a href={seg.href} target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 underline">
-                  {seg.text}
-                </a>
-              );
+              return isSafeUrl(seg.href)
+                ? (
+                  <a href={seg.href} target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 underline">
+                    {seg.text}
+                  </a>
+                )
+                : <span>{seg.text}</span>;
             case "heading": {
               const classes: Record<number, string> = {
                 1: "text-lg font-bold text-gray-100 mt-3 mb-1",
