@@ -10,7 +10,8 @@ type Segment =
   | { kind: "bold"; text: string }
   | { kind: "code_block"; lang: string; code: string }
   | { kind: "inline_code"; code: string }
-  | { kind: "details"; summary: string; body: Segment[] };
+  | { kind: "details"; summary: string; body: Segment[] }
+  | { kind: "blockquote"; body: Segment[] };
 
 /** Parse inline markdown/HTML within a text chunk (no block-level elements). */
 function parseInline(text: string): Segment[] {
@@ -57,6 +58,43 @@ function parseInline(text: string): Segment[] {
   return segments;
 }
 
+/** Parse a text chunk for blockquotes, then delegate remaining to parseInline. */
+function parseBlockquotes(text: string): Segment[] {
+  const lines = text.split("\n");
+  const segments: Segment[] = [];
+  let quoteLines: string[] = [];
+  let normalLines: string[] = [];
+
+  const flushNormal = () => {
+    if (normalLines.length > 0) {
+      segments.push(...parseInline(normalLines.join("\n")));
+      normalLines = [];
+    }
+  };
+
+  const flushQuote = () => {
+    if (quoteLines.length > 0) {
+      const inner = quoteLines.join("\n");
+      segments.push({ kind: "blockquote", body: parseComment(inner) });
+      quoteLines = [];
+    }
+  };
+
+  for (const line of lines) {
+    if (/^>\s?/.test(line)) {
+      flushNormal();
+      quoteLines.push(line.replace(/^>\s?/, ""));
+    } else {
+      flushQuote();
+      normalLines.push(line);
+    }
+  }
+  flushQuote();
+  flushNormal();
+
+  return segments;
+}
+
 /** Top-level parser: extract block elements first, then parse inline content. */
 function parseComment(body: string): Segment[] {
   const segments: Segment[] = [];
@@ -67,7 +105,7 @@ function parseComment(body: string): Segment[] {
 
   while ((match = blockRegex.exec(body)) !== null) {
     if (match.index > lastIndex) {
-      segments.push(...parseInline(body.slice(lastIndex, match.index)));
+      segments.push(...parseBlockquotes(body.slice(lastIndex, match.index)));
     }
     if (match[2] !== undefined && match[0].startsWith("```")) {
       segments.push({ kind: "code_block", lang: match[1] || "", code: match[2] });
@@ -80,7 +118,7 @@ function parseComment(body: string): Segment[] {
   }
 
   if (lastIndex < body.length) {
-    segments.push(...parseInline(body.slice(lastIndex)));
+    segments.push(...parseBlockquotes(body.slice(lastIndex)));
   }
 
   return segments;
@@ -171,6 +209,14 @@ function SegmentRenderer(props: { seg: Segment }) {
             <code class="text-sm font-mono text-gray-200">{seg.code}</code>
           </pre>
         </div>
+      );
+    case "blockquote":
+      return (
+        <blockquote class="my-1 pl-3 border-l-2 border-gray-600 text-gray-400">
+          <For each={seg.body}>
+            {(inner) => <SegmentRenderer seg={inner} />}
+          </For>
+        </blockquote>
       );
     case "details":
       return (
