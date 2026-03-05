@@ -210,7 +210,7 @@ function DiffPage() {
 
   return (
     <div>
-      <div class="flex items-center gap-3 mb-4 sticky top-[-12px] z-20 bg-gray-950 pb-2 pt-[12px] -mx-3 px-3 -mt-3">
+      <div class="flex items-center gap-3 mb-4 sticky top-[-12px] z-20 bg-gray-950 pb-2 -mx-3 px-3 -mt-3 pt-3">
         <button
           onClick={() => navigate("/")}
           class="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-900 border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
@@ -262,10 +262,73 @@ function DiffPage() {
               {matchedPr!.user.login}
             </span>
           </button>
-          <Show when={descOpen() && matchedPr!.body}>
-            <div class="px-3 pb-3 border-t border-gray-800 pt-2">
-              <CommentBody body={matchedPr!.body!} class="text-sm text-gray-300 whitespace-pre-wrap font-sans" />
-            </div>
+          <Show when={descOpen()}>
+            <Show when={matchedPr!.body}>
+              <div class="px-3 pb-3 border-t border-gray-800 pt-2">
+                <CommentBody body={matchedPr!.body!} class="text-sm text-gray-300 whitespace-pre-wrap font-sans" />
+              </div>
+            </Show>
+            <Show when={token()}>
+              <div class="px-3 pb-3 space-y-3">
+                <ReviewPanel
+                  owner={params.owner}
+                  repo={params.repo}
+                  prNumber={prNumber()}
+                  token={token()}
+                  collaborators={collaborators()}
+                />
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-3 space-y-3">
+                  <h3 class="text-sm font-semibold text-gray-200">
+                    Activity{timeline().length > 0 ? ` (${timeline().length})` : ""}
+                  </h3>
+                  <Show when={timeline().length > 0}>
+                    <div class="space-y-2">
+                      <For each={timeline()}>
+                        {(item) => (
+                          <div class={`bg-gray-950 border rounded-lg px-3 py-2 ${
+                            item.kind === "review" && item.state === "APPROVED"
+                              ? "border-green-900"
+                              : item.kind === "review" && item.state === "CHANGES_REQUESTED"
+                                ? "border-red-900"
+                                : "border-gray-800"
+                          }`}>
+                            <div class="flex items-center gap-2 mb-1">
+                              <img
+                                src={item.user.avatar_url}
+                                class="w-4 h-4 rounded-full"
+                                alt=""
+                              />
+                              <span class="text-xs font-medium text-gray-200">
+                                {item.user.login}
+                              </span>
+                              {item.kind === "review" && reviewStateBadge(item.state)}
+                              <span class="text-xs text-gray-500">
+                                {new Date(item.date).toLocaleDateString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })}
+                              </span>
+                            </div>
+                            <Show when={item.kind === "comment" ? item.body : item.kind === "review" ? item.body : undefined}>
+                              {(body) => (
+                                <CommentBody body={body()} />
+                              )}
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                  <CommentBox
+                    onSubmit={handlePostComment}
+                    placeholder="Leave a comment..."
+                    collaborators={collaborators()}
+                  />
+                </div>
+              </div>
+            </Show>
           </Show>
         </div>
       </Show>
@@ -282,7 +345,7 @@ function DiffPage() {
 
       <Show when={!loading() && !error()}>
         <div class="flex gap-3 items-start">
-          <div class="w-56 flex-shrink-0 sticky top-[52px] max-h-[calc(100vh-72px)] overflow-y-auto">
+          <div class="w-56 flex-shrink-0 sticky top-[36px] max-h-[calc(100vh-48px)] overflow-y-auto">
             <FileTree files={files()} />
           </div>
           <div class="flex-1 min-w-0 space-y-4">
@@ -297,65 +360,6 @@ function DiffPage() {
               onInlineCommentsChange={fetchInlineComments}
               collaborators={collaborators()}
             />
-            <Show when={token()}>
-              <ReviewPanel
-                owner={params.owner}
-                repo={params.repo}
-                prNumber={prNumber()}
-                token={token()}
-                collaborators={collaborators()}
-              />
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-3 space-y-3">
-                <h3 class="text-sm font-semibold text-gray-200">
-                  Activity{timeline().length > 0 ? ` (${timeline().length})` : ""}
-                </h3>
-                <Show when={timeline().length > 0}>
-                  <div class="space-y-2">
-                    <For each={timeline()}>
-                      {(item) => (
-                        <div class={`bg-gray-950 border rounded-lg px-3 py-2 ${
-                          item.kind === "review" && item.state === "APPROVED"
-                            ? "border-green-900"
-                            : item.kind === "review" && item.state === "CHANGES_REQUESTED"
-                              ? "border-red-900"
-                              : "border-gray-800"
-                        }`}>
-                          <div class="flex items-center gap-2 mb-1">
-                            <img
-                              src={item.user.avatar_url}
-                              class="w-4 h-4 rounded-full"
-                              alt=""
-                            />
-                            <span class="text-xs font-medium text-gray-200">
-                              {item.user.login}
-                            </span>
-                            {item.kind === "review" && reviewStateBadge(item.state)}
-                            <span class="text-xs text-gray-500">
-                              {new Date(item.date).toLocaleDateString(undefined, {
-                                month: "short",
-                                day: "numeric",
-                                hour: "numeric",
-                                minute: "2-digit",
-                              })}
-                            </span>
-                          </div>
-                          <Show when={item.kind === "comment" ? item.body : item.kind === "review" ? item.body : undefined}>
-                            {(body) => (
-                              <CommentBody body={body()} />
-                            )}
-                          </Show>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-                <CommentBox
-                  onSubmit={handlePostComment}
-                  placeholder="Leave a comment..."
-                  collaborators={collaborators()}
-                />
-              </div>
-            </Show>
           </div>
         </div>
       </Show>

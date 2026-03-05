@@ -356,7 +356,7 @@ function FileSection(props: {
       class="border border-gray-800 rounded"
     >
       <button
-        class="w-full flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 text-left text-xs rounded-t sticky top-[42px] z-10"
+        class="w-full flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 text-left text-xs rounded-t sticky top-[36px] z-10"
         onClick={() => setOpen(!open())}
       >
         <span class="text-gray-500">{open() ? "\u25BC" : "\u25B6"}</span>
