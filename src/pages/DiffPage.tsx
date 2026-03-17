@@ -12,6 +12,7 @@ import CommentBody from "../components/CommentBody";
 
 interface AppSettings {
   github_token: string;
+  username: string;
 }
 
 interface IssueComment {
@@ -37,6 +38,7 @@ function DiffPage() {
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal("");
   const [token, setToken] = createSignal("");
+  const [username, setUsername] = createSignal("");
   const [inlineComments, setInlineComments] = createSignal<InlineComment[]>([]);
   const [headSha, setHeadSha] = createSignal("");
   const [descOpen, setDescOpen] = createSignal(false);
@@ -45,6 +47,7 @@ function DiffPage() {
   const [collaborators, setCollaborators] = createSignal<Collaborator[]>([]);
   const [activeFileIndex, setActiveFileIndex] = createSignal(0);
   const [viewedFiles, setViewedFiles] = createSignal<Record<string, FileViewEntry>>({});
+  const [checkStatus, setCheckStatus] = createSignal<{ state: string; total: number; passed: number; failed: number; pending: number } | null>(null);
 
   const activeFile = () => files()[activeFileIndex()]?.filename;
 
@@ -68,11 +71,15 @@ function DiffPage() {
     }
   };
 
+  let diffAreaRef: HTMLDivElement | undefined;
+  const scrollToTop = () => diffAreaRef?.scrollIntoView({ block: "start" });
+
   const selectFile = (filename: string) => {
     const idx = files().findIndex((f) => f.filename === filename);
     if (idx >= 0) {
       setActiveFileIndex(idx);
       markFileViewed(filename);
+      scrollToTop();
     }
   };
 
@@ -82,6 +89,7 @@ function DiffPage() {
     const next = Math.min(activeFileIndex() + 1, len - 1);
     setActiveFileIndex(next);
     markFileViewed(files()[next].filename);
+    scrollToTop();
   };
 
   const goPrevFile = () => {
@@ -89,6 +97,7 @@ function DiffPage() {
     const prev = Math.max(activeFileIndex() - 1, 0);
     setActiveFileIndex(prev);
     markFileViewed(files()[prev].filename);
+    scrollToTop();
   };
 
   // Review modal state
@@ -102,10 +111,12 @@ function DiffPage() {
   let matchedPr: ReturnType<typeof usePRData>["prs"] extends () => (infer T)[]
     ? T | undefined
     : undefined;
+  let prDataLoadData: (() => Promise<void>) | undefined;
 
   try {
-    const { prs } = usePRData();
+    const { prs, loadData: ld } = usePRData();
     prDataAvailable = true;
+    prDataLoadData = ld;
     const found = prs().find(
       (p) =>
         p.repo_owner === params.owner &&
@@ -116,6 +127,8 @@ function DiffPage() {
   } catch {
     // Not inside PRDataProvider — skip description
   }
+
+  const [isDraft, setIsDraft] = createSignal(matchedPr?.draft ?? false);
 
   const prNumber = () => parseInt(params.number);
 
@@ -131,6 +144,19 @@ function DiffPage() {
       setComments(result);
     } catch (e) {
       console.error("Failed to fetch comments:", e);
+    }
+  };
+
+  const fetchReviews = async () => {
+    if (!token()) return;
+    try {
+      const result = await invoke<ReviewComment[]>("get_reviews", {
+        owner: params.owner, repo: params.repo,
+        prNumber: prNumber(), token: token(),
+      });
+      setReviews(result);
+    } catch (e) {
+      console.error("Failed to fetch reviews:", e);
     }
   };
 
@@ -153,6 +179,7 @@ function DiffPage() {
     try {
       const settings = await invoke<AppSettings>("get_settings");
       setToken(settings.github_token);
+      setUsername(settings.username);
 
       const [result, sha] = await Promise.all([
         invoke<PrFile[]>("get_pr_files", {
@@ -170,6 +197,12 @@ function DiffPage() {
       ]);
       setFiles(result);
       setHeadSha(sha);
+
+      // Fetch check status (non-blocking)
+      invoke<{ state: string; total: number; passed: number; failed: number; pending: number }>(
+        "get_check_status",
+        { owner: params.owner, repo: params.repo, gitRef: sha, token: settings.github_token },
+      ).then(setCheckStatus).catch(() => {});
 
       // Fetch inline comments
       const comments = await invoke<InlineComment[]>("get_inline_comments", {
@@ -241,24 +274,104 @@ function DiffPage() {
     }
   });
 
+  const commentCounts = () => {
+    const counts: Record<string, number> = {};
+    for (const c of inlineComments()) {
+      if (!c.is_resolved) {
+        counts[c.path] = (counts[c.path] || 0) + 1;
+      }
+    }
+    return counts;
+  };
+
   const ghUrl = () =>
     `https://github.com/${params.owner}/${params.repo}/pull/${params.number}`;
 
   type TimelineItem =
-    | { kind: "comment"; user: { login: string; avatar_url: string }; body: string; date: string }
-    | { kind: "review"; user: { login: string; avatar_url: string }; state: string; body?: string; date: string };
+    | { kind: "comment"; id: number; user: { login: string; avatar_url: string }; body: string; date: string }
+    | { kind: "review"; id: number; user: { login: string; avatar_url: string }; state: string; body?: string; date: string };
 
   const timeline = () => {
     const items: TimelineItem[] = [];
     for (const c of comments()) {
-      items.push({ kind: "comment", user: c.user, body: c.body, date: c.created_at });
+      items.push({ kind: "comment", id: c.id, user: c.user, body: c.body, date: c.created_at });
     }
     for (const r of reviews()) {
       if (r.state === "PENDING") continue;
-      items.push({ kind: "review", user: r.user, state: r.state, body: r.body || undefined, date: r.submitted_at || "" });
+      items.push({ kind: "review", id: r.id, user: r.user, state: r.state, body: r.body || undefined, date: r.submitted_at || "" });
     }
     items.sort((a, b) => a.date.localeCompare(b.date));
     return items;
+  };
+
+  const [editingItemId, setEditingItemId] = createSignal<number | null>(null);
+  const [editBody, setEditBody] = createSignal("");
+  const [editSubmitting, setEditSubmitting] = createSignal(false);
+
+  const startEdit = (item: TimelineItem) => {
+    const body = item.kind === "comment" ? item.body : (item.body || "");
+    setEditingItemId(item.id);
+    setEditBody(body);
+  };
+
+  const cancelEdit = () => {
+    setEditingItemId(null);
+    setEditBody("");
+  };
+
+  const submitEdit = async (item: TimelineItem) => {
+    if (editSubmitting()) return;
+    setEditSubmitting(true);
+    try {
+      if (item.kind === "comment") {
+        await invoke("edit_comment", {
+          owner: params.owner,
+          repo: params.repo,
+          commentId: item.id,
+          body: editBody(),
+          token: token(),
+        });
+      }
+      setEditingItemId(null);
+      setEditBody("");
+      await fetchComments();
+    } catch (e) {
+      console.error("Failed to edit comment:", e);
+    } finally {
+      setEditSubmitting(false);
+    }
+  };
+
+  // PR description editing
+  const [editingDesc, setEditingDesc] = createSignal(false);
+  const [editDescBody, setEditDescBody] = createSignal("");
+  const [editDescSubmitting, setEditDescSubmitting] = createSignal(false);
+
+  const startDescEdit = () => {
+    setEditDescBody(matchedPr?.body || "");
+    setEditingDesc(true);
+  };
+
+  const submitDescEdit = async () => {
+    if (editDescSubmitting()) return;
+    setEditDescSubmitting(true);
+    try {
+      await invoke("edit_pr_body", {
+        owner: params.owner,
+        repo: params.repo,
+        prNumber: prNumber(),
+        body: editDescBody(),
+        token: token(),
+      });
+      if (matchedPr) {
+        matchedPr.body = editDescBody();
+      }
+      setEditingDesc(false);
+    } catch (e) {
+      console.error("Failed to edit PR description:", e);
+    } finally {
+      setEditDescSubmitting(false);
+    }
   };
 
   const reviewStateBadge = (state: string) => {
@@ -299,6 +412,7 @@ function DiffPage() {
         "Review submitted!"
       );
       setReviewModalBody("");
+      await Promise.all([fetchComments(), fetchReviews()]);
       setTimeout(() => {
         setReviewModalOpen(false);
         setReviewModalResult(null);
@@ -357,6 +471,49 @@ function DiffPage() {
         <h2 class="text-lg font-bold text-gray-100 flex-1 min-w-0 truncate">
           {params.owner}/{params.repo}#{params.number}
         </h2>
+        <Show when={checkStatus()}>
+          {(cs) => {
+            const s = cs();
+            if (s.state === "none") return null;
+            const color = s.state === "success" ? "text-green-400" : s.state === "failure" ? "text-red-400" : "text-yellow-400";
+            const icon = s.state === "success" ? "\u2713" : s.state === "failure" ? "\u2717" : "\u25CB";
+            return (
+              <span class={`text-xs font-medium ${color}`} title={`${s.passed} passed, ${s.failed} failed, ${s.pending} pending`}>
+                {icon} {s.passed}/{s.total}
+              </span>
+            );
+          }}
+        </Show>
+        <Show when={isDraft() && matchedPr?.user.login === username()}>
+          {(() => {
+            const [marking, setMarking] = createSignal(false);
+            return (
+              <button
+                class="px-3 py-1.5 rounded-lg text-xs font-medium bg-green-900 border border-green-800 text-green-300 hover:bg-green-800 transition-colors disabled:opacity-50"
+                disabled={marking()}
+                onClick={async () => {
+                  setMarking(true);
+                  try {
+                    await invoke("mark_ready_for_review", {
+                      owner: params.owner,
+                      repo: params.repo,
+                      prNumber: prNumber(),
+                      token: token(),
+                    });
+                    setIsDraft(false);
+                    prDataLoadData?.();
+                  } catch (e) {
+                    console.error("Failed to mark ready:", e);
+                  } finally {
+                    setMarking(false);
+                  }
+                }}
+              >
+                {marking() ? "Marking ready..." : "Ready for review"}
+              </button>
+            );
+          })()}
+        </Show>
         <Show when={token()}>
           <button
             class={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -416,9 +573,49 @@ function DiffPage() {
             </span>
           </button>
           <Show when={descOpen()}>
-            <Show when={matchedPr!.body}>
+            <Show when={matchedPr!.body || username()}>
               <div class="px-3 pb-3 border-t border-gray-800 pt-2">
-                <CommentBody body={matchedPr!.body!} class="text-sm text-gray-300 whitespace-pre-wrap font-sans" />
+                <Show when={editingDesc()} fallback={
+                  <div class="group/desc relative">
+                    <Show when={matchedPr!.body}>
+                      <CommentBody body={matchedPr!.body!} class="text-sm text-gray-300 whitespace-pre-wrap font-sans" />
+                    </Show>
+                    <Show when={username()}>
+                      <button
+                        onClick={startDescEdit}
+                        class="text-[10px] text-gray-500 hover:text-gray-300 mt-1 transition-colors"
+                      >
+                        Edit
+                      </button>
+                    </Show>
+                  </div>
+                }>
+                  <div class="space-y-2">
+                    <MentionTextarea
+                      value={editDescBody}
+                      onValueChange={setEditDescBody}
+                      placeholder="PR description..."
+                      disabled={editDescSubmitting()}
+                      collaborators={collaborators()}
+                      class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2 text-sm text-gray-200 placeholder-gray-500 resize-y min-h-[80px] focus:outline-none focus:border-blue-600"
+                    />
+                    <div class="flex gap-2">
+                      <button
+                        onClick={submitDescEdit}
+                        disabled={editDescSubmitting()}
+                        class="px-3 py-1 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                      >
+                        {editDescSubmitting() ? "Saving..." : "Save"}
+                      </button>
+                      <button
+                        onClick={() => setEditingDesc(false)}
+                        class="px-3 py-1 rounded-lg text-xs text-gray-400 hover:text-gray-200 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </Show>
               </div>
             </Show>
             <Show when={token()}>
@@ -456,11 +653,47 @@ function DiffPage() {
                                   minute: "2-digit",
                                 })}
                               </span>
+                              <Show when={item.kind === "comment" && item.user.login === username()}>
+                                <button
+                                  onClick={() => startEdit(item)}
+                                  class="text-[10px] text-gray-500 hover:text-gray-300 ml-auto transition-colors"
+                                >
+                                  Edit
+                                </button>
+                              </Show>
                             </div>
-                            <Show when={item.kind === "comment" ? item.body : item.kind === "review" ? item.body : undefined}>
-                              {(body) => (
-                                <CommentBody body={body()} />
-                              )}
+                            <Show when={editingItemId() === item.id} fallback={
+                              <Show when={item.kind === "comment" ? item.body : item.kind === "review" ? item.body : undefined}>
+                                {(body) => (
+                                  <CommentBody body={body()} />
+                                )}
+                              </Show>
+                            }>
+                              <div class="space-y-2 mt-1">
+                                <MentionTextarea
+                                  value={editBody}
+                                  onValueChange={setEditBody}
+                                  placeholder="Edit comment..."
+                                  disabled={editSubmitting()}
+                                  collaborators={collaborators()}
+                                  class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2 text-sm text-gray-200 placeholder-gray-500 resize-y min-h-[60px] focus:outline-none focus:border-blue-600"
+                                />
+                                <div class="flex gap-2">
+                                  <button
+                                    onClick={() => submitEdit(item)}
+                                    disabled={editSubmitting()}
+                                    class="px-3 py-1 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                                  >
+                                    {editSubmitting() ? "Saving..." : "Save"}
+                                  </button>
+                                  <button
+                                    onClick={cancelEdit}
+                                    class="px-3 py-1 rounded-lg text-xs text-gray-400 hover:text-gray-200 transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
                             </Show>
                           </div>
                         )}
@@ -499,10 +732,11 @@ function DiffPage() {
               files={files()}
               activeFile={activeFile()}
               viewedFiles={viewedFiles()}
+              commentCounts={commentCounts()}
               onSelectFile={selectFile}
             />
           </div>
-          <div class="flex-1 min-w-0 space-y-4">
+          <div ref={diffAreaRef} class="flex-1 min-w-0 space-y-4">
             <div class="flex items-center gap-2">
               <button
                 onClick={goPrevFile}
@@ -535,6 +769,17 @@ function DiffPage() {
               headSha={headSha()}
               onInlineCommentsChange={fetchInlineComments}
               collaborators={collaborators()}
+              username={username()}
+              onEditInlineComment={async (commentId, body) => {
+                await invoke("edit_inline_comment", {
+                  owner: params.owner,
+                  repo: params.repo,
+                  commentId,
+                  body,
+                  token: token(),
+                });
+                await fetchInlineComments();
+              }}
             />
           </div>
         </div>

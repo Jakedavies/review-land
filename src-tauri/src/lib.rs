@@ -100,6 +100,10 @@ async fn get_open_prs(
     let all_repos: Vec<_> = repos.iter().filter(|r| r.filter_mode != "involved").collect();
     let involved_repos: Vec<_> = repos.iter().filter(|r| r.filter_mode == "involved").collect();
 
+    if !involved_repos.is_empty() && username.is_empty() {
+        return Err("Username is required for 'Mine + Tagged' filter mode. Set it in Settings.".to_string());
+    }
+
     // Fetch "all" repos normally
     let all_fetches: Vec<_> = all_repos
         .iter()
@@ -230,6 +234,59 @@ async fn post_inline_comment(
 }
 
 #[tauri::command]
+async fn mark_ready_for_review(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    token: String,
+) -> Result<(), String> {
+    github::mark_pr_ready_for_review(&owner, &repo, pr_number, &token).await
+}
+
+#[tauri::command]
+async fn edit_pr_body(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    body: String,
+    token: String,
+) -> Result<(), String> {
+    github::edit_pr_body(&owner, &repo, pr_number, &body, &token).await
+}
+
+#[tauri::command]
+async fn edit_comment(
+    owner: String,
+    repo: String,
+    comment_id: u64,
+    body: String,
+    token: String,
+) -> Result<github::IssueComment, String> {
+    github::edit_issue_comment(&owner, &repo, comment_id, &body, &token).await
+}
+
+#[tauri::command]
+async fn edit_inline_comment(
+    owner: String,
+    repo: String,
+    comment_id: u64,
+    body: String,
+    token: String,
+) -> Result<github::InlineComment, String> {
+    github::edit_inline_comment(&owner, &repo, comment_id, &body, &token).await
+}
+
+#[tauri::command]
+async fn get_check_status(
+    owner: String,
+    repo: String,
+    git_ref: String,
+    token: String,
+) -> Result<github::CheckStatus, String> {
+    github::fetch_check_status(&owner, &repo, &git_ref, &token).await
+}
+
+#[tauri::command]
 async fn get_pr_head_sha(
     owner: String,
     repo: String,
@@ -284,6 +341,11 @@ pub fn run() {
             get_inline_comments,
             post_inline_comment,
             get_pr_head_sha,
+            get_check_status,
+            mark_ready_for_review,
+            edit_pr_body,
+            edit_comment,
+            edit_inline_comment,
             proxy_image,
         ])
         .run(tauri::generate_context!())

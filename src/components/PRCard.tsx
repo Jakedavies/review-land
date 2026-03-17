@@ -8,6 +8,14 @@ interface Label {
   color: string;
 }
 
+interface CheckStatus {
+  state: string;
+  total: number;
+  passed: number;
+  failed: number;
+  pending: number;
+}
+
 interface PRCardProps {
   number: number;
   title: string;
@@ -22,10 +30,13 @@ interface PRCardProps {
   labels: Label[];
   draft: boolean;
   review_state: string | null;
+  total_comments: number;
   new_comments: number;
   new_reviews: number;
+  only_own_activity: boolean;
   is_mine: boolean;
   review_requested: boolean;
+  check_status?: CheckStatus;
   onViewed?: () => void;
 }
 
@@ -40,6 +51,38 @@ function reviewDot(state: string | null, draft: boolean) {
       return <span class="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" title="Changes requested" />;
     default:
       return <span class="w-2 h-2 rounded-full bg-yellow-400 flex-shrink-0" title="Pending review" />;
+  }
+}
+
+function checkIcon(status?: CheckStatus) {
+  if (!status || status.state === "none") return null;
+  switch (status.state) {
+    case "success":
+      return (
+        <span class="flex-shrink-0" title={`${status.passed}/${status.total} checks passed`}>
+          <svg class="w-3.5 h-3.5 text-green-400" viewBox="0 0 16 16" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.72a.75.75 0 00-1.06-1.06L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25z" />
+          </svg>
+        </span>
+      );
+    case "failure":
+      return (
+        <span class="flex-shrink-0" title={`${status.failed} check${status.failed !== 1 ? "s" : ""} failed`}>
+          <svg class="w-3.5 h-3.5 text-red-400" viewBox="0 0 16 16" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 16A8 8 0 108 0a8 8 0 000 16zm3.03-11.03a.75.75 0 010 1.06L9.06 8l1.97 1.97a.75.75 0 01-1.06 1.06L8 9.06l-1.97 1.97a.75.75 0 01-1.06-1.06L6.94 8 4.97 6.03a.75.75 0 011.06-1.06L8 6.94l1.97-1.97a.75.75 0 011.06 0z" />
+          </svg>
+        </span>
+      );
+    case "pending":
+      return (
+        <span class="flex-shrink-0" title={`${status.pending} check${status.pending !== 1 ? "s" : ""} pending`}>
+          <svg class="w-3.5 h-3.5 text-yellow-400 animate-[spin_3s_linear_infinite]" viewBox="0 0 16 16" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 16A8 8 0 108 0a8 8 0 000 16zm.75-11.25a.75.75 0 00-1.5 0v3.69L5.22 10.47a.75.75 0 001.06 1.06l2.5-2.5a.75.75 0 00.22-.53V4.75z" />
+          </svg>
+        </span>
+      );
+    default:
+      return null;
   }
 }
 
@@ -72,12 +115,15 @@ function PRCard(props: PRCardProps) {
     props.onViewed?.();
   };
 
+  const hasNewActivity = () => props.new_comments > 0 || props.new_reviews > 0;
+
   const updatedSinceViewed = () => {
     if (!props.last_viewed_at) return false;
+    if (props.only_own_activity) return false;
     return props.updated_at > props.last_viewed_at;
   };
 
-  const hasActivity = () => props.new_comments > 0 || updatedSinceViewed();
+  const hasActivity = () => hasNewActivity() || updatedSinceViewed();
 
   return (
     <div
@@ -88,6 +134,7 @@ function PRCard(props: PRCardProps) {
     >
       <div class="flex items-center gap-2 min-w-0">
         {reviewDot(props.review_state, props.draft)}
+        {checkIcon(props.check_status)}
         <img
           src={props.author_avatar}
           alt={props.author}
@@ -115,17 +162,22 @@ function PRCard(props: PRCardProps) {
               Review
             </span>
           )}
-          <Show when={props.new_comments > 0}>
-            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-900 text-indigo-300">
-              {props.new_comments} comment{props.new_comments !== 1 ? "s" : ""}
+          <Show when={props.total_comments > 0}>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-400">
+              {props.total_comments} comment{props.total_comments !== 1 ? "s" : ""}
             </span>
           </Show>
-          <Show when={updatedSinceViewed()}>
+          <Show when={hasNewActivity()}>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-900 text-indigo-300">
+              {props.new_comments + props.new_reviews} new
+            </span>
+          </Show>
+          <Show when={!hasNewActivity() && updatedSinceViewed()}>
             <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-900 text-orange-300">
               Updated
             </span>
           </Show>
-          <Show when={props.last_viewed_at && !updatedSinceViewed()}>
+          <Show when={props.last_viewed_at && !hasActivity()}>
             <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-400">
               Viewed {timeAgo(props.last_viewed_at!)}
             </span>

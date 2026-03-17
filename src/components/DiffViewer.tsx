@@ -122,6 +122,8 @@ export interface InlineComment {
   created_at: string;
   html_url?: string;
   commit_id?: string;
+  in_reply_to_id?: number;
+  is_resolved: boolean;
 }
 
 interface DiffViewerProps {
@@ -135,6 +137,8 @@ interface DiffViewerProps {
   headSha?: string;
   onInlineCommentsChange?: () => void;
   collaborators?: Collaborator[];
+  username?: string;
+  onEditInlineComment?: (commentId: number, body: string) => Promise<void>;
 }
 
 function statusBadge(status: string) {
@@ -160,34 +164,79 @@ getHighlighter().then(() => setHighlighterReady(true));
 interface ParsedLine {
   raw: string;
   rightLineNum: number | null;
+  leftLineNum: number | null;
 }
 
 function parsePatchLines(patch: string): ParsedLine[] {
   const lines = patch.split("\n");
   const result: ParsedLine[] = [];
   let rightLine = 0;
+  let leftLine = 0;
 
   for (const line of lines) {
-    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunkMatch) {
-      rightLine = parseInt(hunkMatch[1], 10);
-      result.push({ raw: line, rightLineNum: null });
+      leftLine = parseInt(hunkMatch[1], 10);
+      rightLine = parseInt(hunkMatch[2], 10);
+      result.push({ raw: line, rightLineNum: null, leftLineNum: null });
       continue;
     }
 
     if (line.startsWith("-")) {
-      result.push({ raw: line, rightLineNum: null });
+      result.push({ raw: line, rightLineNum: null, leftLineNum: leftLine });
+      leftLine++;
     } else if (line.startsWith("+")) {
-      result.push({ raw: line, rightLineNum: rightLine });
+      result.push({ raw: line, rightLineNum: rightLine, leftLineNum: null });
       rightLine++;
     } else {
       // context line
-      result.push({ raw: line, rightLineNum: rightLine });
+      result.push({ raw: line, rightLineNum: rightLine, leftLineNum: leftLine });
       rightLine++;
+      leftLine++;
     }
   }
 
   return result;
+}
+
+function ResolvedThread(props: { comments: InlineComment[] }) {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <div class="border border-gray-700/50 rounded text-xs">
+      <button
+        class="w-full flex items-center gap-1.5 px-2 py-1 text-left text-gray-500 hover:text-gray-400 transition-colors"
+        onClick={() => setOpen(!open())}
+      >
+        <span class="text-[10px]">{open() ? "\u25BC" : "\u25B6"}</span>
+        <span class="px-1 py-0.5 rounded text-[9px] font-medium bg-purple-900/50 text-purple-400">Resolved</span>
+        <span>{props.comments.length} comment{props.comments.length !== 1 ? "s" : ""}</span>
+      </button>
+      <Show when={open()}>
+        <div class="px-2 pb-1.5 space-y-1 opacity-70">
+          <For each={props.comments}>
+            {(comment) => (
+              <div class="bg-gray-800/50 border border-gray-700/50 rounded px-2 py-1.5">
+                <div class="flex items-center gap-1.5 mb-1">
+                  <img
+                    src={comment.user.avatar_url}
+                    class="w-4 h-4 rounded-full"
+                    alt=""
+                  />
+                  <span class="font-medium text-gray-400">
+                    {comment.user.login}
+                  </span>
+                  <span class="text-gray-600">
+                    {new Date(comment.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+                <CommentBody body={comment.body} class="text-gray-400 whitespace-pre-wrap text-xs" />
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
 }
 
 function HighlightedLine(props: {
@@ -196,8 +245,13 @@ function HighlightedLine(props: {
   lineNum: number | null;
   onAddComment?: (lineNum: number) => void;
   existingComments?: InlineComment[];
+  username?: string;
+  onEditComment?: (commentId: number, body: string) => Promise<void>;
 }) {
   const [hovered, setHovered] = createSignal(false);
+  const [editingId, setEditingId] = createSignal<number | null>(null);
+  const [editText, setEditText] = createSignal("");
+  const [editSaving, setEditSaving] = createSignal(false);
   const prefix = () => props.line[0] ?? "";
   const code = () => (props.line.length > 0 ? props.line.slice(1) : "");
 
@@ -278,28 +332,82 @@ function HighlightedLine(props: {
         </span>
       </div>
       <Show when={props.existingComments && props.existingComments.length > 0}>
-        <div class="ml-10 mr-3 my-1 space-y-1">
-          <For each={props.existingComments}>
-            {(comment) => (
-              <div class="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs">
-                <div class="flex items-center gap-1.5 mb-1">
-                  <img
-                    src={comment.user.avatar_url}
-                    class="w-4 h-4 rounded-full"
-                    alt=""
-                  />
-                  <span class="font-medium text-gray-200">
-                    {comment.user.login}
-                  </span>
-                  <span class="text-gray-500">
-                    {new Date(comment.created_at).toLocaleDateString()}
-                  </span>
-                </div>
-                <CommentBody body={comment.body} class="text-gray-300 whitespace-pre-wrap text-xs" />
-              </div>
-            )}
-          </For>
-        </div>
+        {(() => {
+          const active = () => props.existingComments!.filter((c) => !c.is_resolved);
+          const resolved = () => props.existingComments!.filter((c) => c.is_resolved);
+          return (
+            <div class="ml-10 mr-3 my-1 space-y-1">
+              <For each={active()}>
+                {(comment) => (
+                  <div class="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <img
+                        src={comment.user.avatar_url}
+                        class="w-4 h-4 rounded-full"
+                        alt=""
+                      />
+                      <span class="font-medium text-gray-200">
+                        {comment.user.login}
+                      </span>
+                      <span class="text-gray-500">
+                        {new Date(comment.created_at).toLocaleDateString()}
+                      </span>
+                      <Show when={props.username && comment.user.login === props.username && props.onEditComment}>
+                        <button
+                          onClick={() => {
+                            setEditingId(comment.id);
+                            setEditText(comment.body);
+                          }}
+                          class="text-[10px] text-gray-500 hover:text-gray-300 ml-auto transition-colors"
+                        >
+                          Edit
+                        </button>
+                      </Show>
+                    </div>
+                    <Show when={editingId() === comment.id} fallback={
+                      <CommentBody body={comment.body} class="text-gray-300 whitespace-pre-wrap text-xs" />
+                    }>
+                      <div class="space-y-1.5 mt-1">
+                        <textarea
+                          value={editText()}
+                          onInput={(e) => setEditText(e.currentTarget.value)}
+                          disabled={editSaving()}
+                          class="w-full bg-gray-950 border border-gray-700 rounded p-1.5 text-xs text-gray-200 placeholder-gray-500 resize-y min-h-[40px] focus:outline-none focus:border-blue-600"
+                        />
+                        <div class="flex gap-1.5">
+                          <button
+                            onClick={async () => {
+                              setEditSaving(true);
+                              try {
+                                await props.onEditComment!(comment.id, editText());
+                                setEditingId(null);
+                              } finally {
+                                setEditSaving(false);
+                              }
+                            }}
+                            disabled={editSaving()}
+                            class="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                          >
+                            {editSaving() ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            onClick={() => setEditingId(null)}
+                            class="px-2 py-0.5 rounded text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </Show>
+                  </div>
+                )}
+              </For>
+              <Show when={resolved().length > 0}>
+                <ResolvedThread comments={resolved()} />
+              </Show>
+            </div>
+          );
+        })()}
       </Show>
     </>
   );
@@ -315,6 +423,8 @@ function FileSection(props: {
   headSha?: string;
   onInlineCommentsChange?: () => void;
   collaborators?: Collaborator[];
+  username?: string;
+  onEditInlineComment?: (commentId: number, body: string) => Promise<void>;
 }) {
   const [open, setOpen] = createSignal(true);
   const [activeCommentLine, setActiveCommentLine] = createSignal<number | null>(
@@ -328,8 +438,14 @@ function FileSection(props: {
   const commentsForFile = () =>
     (props.inlineComments ?? []).filter((c) => c.path === f.filename);
 
-  const commentsForLine = (lineNum: number) =>
-    commentsForFile().filter((c) => c.line === lineNum);
+  const commentsForLine = (lineNum: number, side: "LEFT" | "RIGHT") =>
+    commentsForFile().filter((c) => {
+      if (side === "LEFT") {
+        return c.line === lineNum && c.side === "LEFT";
+      }
+      // RIGHT side: match comments with no explicit side (legacy) or side=RIGHT
+      return c.line === lineNum && c.side !== "LEFT";
+    });
 
   const canComment = () =>
     props.owner && props.repo && props.prNumber && props.token && props.headSha;
@@ -395,9 +511,13 @@ function FileSection(props: {
                       }
                       existingComments={
                         parsed.rightLineNum != null
-                          ? commentsForLine(parsed.rightLineNum)
-                          : undefined
+                          ? commentsForLine(parsed.rightLineNum, "RIGHT")
+                          : parsed.leftLineNum != null
+                            ? commentsForLine(parsed.leftLineNum, "LEFT")
+                            : undefined
                       }
+                      username={props.username}
+                      onEditComment={props.onEditInlineComment}
                     />
                     <Show
                       when={
@@ -457,6 +577,8 @@ function DiffViewer(props: DiffViewerProps) {
             headSha={props.headSha}
             onInlineCommentsChange={props.onInlineCommentsChange}
             collaborators={props.collaborators}
+            username={props.username}
+            onEditInlineComment={props.onEditInlineComment}
           />
         )}
       </For>

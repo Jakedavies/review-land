@@ -99,6 +99,7 @@ function TreeNodeView(props: {
   depth: number;
   activeFile?: string;
   viewedFiles?: Record<string, FileViewEntry>;
+  commentCounts?: Record<string, number>;
   onSelectFile?: (filename: string) => void;
 }) {
   const [open, setOpen] = createSignal(true);
@@ -148,6 +149,11 @@ function TreeNodeView(props: {
         >
           {props.node.name}
         </span>
+        <Show when={!isDir() && props.commentCounts?.[props.node.file!.filename]}>
+          <span class="px-1 rounded text-[9px] font-medium bg-indigo-900 text-indigo-300 flex-shrink-0">
+            {props.commentCounts![props.node.file!.filename]}
+          </span>
+        </Show>
         <Show when={!isDir()}>
           {viewedIndicator(viewedStatus())}
         </Show>
@@ -160,6 +166,7 @@ function TreeNodeView(props: {
               depth={props.depth + 1}
               activeFile={props.activeFile}
               viewedFiles={props.viewedFiles}
+              commentCounts={props.commentCounts}
               onSelectFile={props.onSelectFile}
             />
           )}
@@ -173,6 +180,7 @@ function FileTree(props: {
   files: PrFile[];
   activeFile?: string;
   viewedFiles?: Record<string, FileViewEntry>;
+  commentCounts?: Record<string, number>;
   onSelectFile?: (filename: string) => void;
 }) {
   const tree = () => buildTree(props.files);
@@ -187,6 +195,7 @@ function FileTree(props: {
             depth={0}
             activeFile={props.activeFile}
             viewedFiles={props.viewedFiles}
+            commentCounts={props.commentCounts}
             onSelectFile={props.onSelectFile}
           />
         )}

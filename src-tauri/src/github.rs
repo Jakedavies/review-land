@@ -32,6 +32,11 @@ pub struct Label {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrHeadRef {
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
@@ -48,6 +53,10 @@ pub struct PullRequest {
     pub draft: bool,
     #[serde(default)]
     pub requested_reviewers: Vec<GitHubUser>,
+    #[serde(default)]
+    pub comments: u64,
+    #[serde(default)]
+    pub head: Option<PrHeadRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +521,112 @@ pub struct InlineComment {
     pub html_url: Option<String>,
     #[serde(default)]
     pub commit_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to_id: Option<u64>,
+    /// Whether this comment belongs to a resolved thread (populated via GraphQL)
+    #[serde(default)]
+    pub is_resolved: bool,
+}
+
+/// Fetch resolved thread root comment IDs via GraphQL.
+async fn fetch_resolved_thread_ids(
+    c: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> std::collections::HashSet<u64> {
+    let query = r#"
+        query($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) {
+                    reviewThreads(first: 100) {
+                        nodes {
+                            isResolved
+                            comments(first: 1) {
+                                nodes { databaseId }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    #[derive(Deserialize)]
+    struct GqlResponse {
+        data: Option<GqlData>,
+    }
+    #[derive(Deserialize)]
+    struct GqlData {
+        repository: Option<GqlRepo>,
+    }
+    #[derive(Deserialize)]
+    struct GqlRepo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<GqlPr>,
+    }
+    #[derive(Deserialize)]
+    struct GqlPr {
+        #[serde(rename = "reviewThreads")]
+        review_threads: GqlConnection<GqlThread>,
+    }
+    #[derive(Deserialize)]
+    struct GqlConnection<T> {
+        nodes: Vec<T>,
+    }
+    #[derive(Deserialize)]
+    struct GqlThread {
+        #[serde(rename = "isResolved")]
+        is_resolved: bool,
+        comments: GqlConnection<GqlComment>,
+    }
+    #[derive(Deserialize)]
+    struct GqlComment {
+        #[serde(rename = "databaseId")]
+        database_id: Option<u64>,
+    }
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": {
+            "owner": owner,
+            "repo": repo,
+            "number": pr_number as i64,
+        }
+    });
+
+    let resp = match c
+        .post("https://api.github.com/graphql")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+
+    let gql: GqlResponse = match resp.json().await {
+        Ok(g) => g,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+
+    let mut resolved_ids = std::collections::HashSet::new();
+    if let Some(data) = gql.data {
+        if let Some(repo) = data.repository {
+            if let Some(pr) = repo.pull_request {
+                for thread in pr.review_threads.nodes {
+                    if thread.is_resolved {
+                        for comment in thread.comments.nodes {
+                            if let Some(id) = comment.database_id {
+                                resolved_ids.insert(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    resolved_ids
 }
 
 pub async fn fetch_pr_inline_comments(
@@ -521,21 +636,36 @@ pub async fn fetch_pr_inline_comments(
     token: &str,
 ) -> Result<Vec<InlineComment>, String> {
     let c = client(token)?;
-    let resp = c
-        .get(format!(
+
+    let (comments_resp, resolved_ids) = tokio::join!(
+        c.get(format!(
             "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100"
         ))
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+        .send(),
+        fetch_resolved_thread_ids(&c, owner, repo, pr_number),
+    );
+
+    let resp = comments_resp.map_err(|e| format!("Request failed: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("GitHub API error: {}", resp.status()));
     }
 
-    resp.json::<Vec<InlineComment>>()
+    let mut comments: Vec<InlineComment> = resp
+        .json()
         .await
-        .map_err(|e| format!("Failed to parse inline comments: {e}"))
+        .map_err(|e| format!("Failed to parse inline comments: {e}"))?;
+
+    // Mark comments as resolved: a comment is resolved if its thread root is in resolved_ids.
+    // Thread root = the comment itself (if no in_reply_to_id) or the in_reply_to_id.
+    for comment in &mut comments {
+        let thread_root = comment.in_reply_to_id.unwrap_or(comment.id);
+        if resolved_ids.contains(&thread_root) {
+            comment.is_resolved = true;
+        }
+    }
+
+    Ok(comments)
 }
 
 pub async fn post_pr_inline_comment(
@@ -560,6 +690,185 @@ pub async fn post_pr_inline_comment(
             "line": line,
             "side": "RIGHT"
         }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+
+    resp.json::<InlineComment>()
+        .await
+        .map_err(|e| format!("Failed to parse inline comment response: {e}"))
+}
+
+// --- Draft / Ready for review ---
+
+pub async fn mark_pr_ready_for_review(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    token: &str,
+) -> Result<(), String> {
+    // This requires the GraphQL API — no REST endpoint exists for this
+    let c = client(token)?;
+    // First get the node ID of the PR
+    let query = r#"
+        query($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) { id }
+            }
+        }
+    "#;
+
+    #[derive(Deserialize)]
+    struct GqlResp {
+        data: Option<GqlData>,
+    }
+    #[derive(Deserialize)]
+    struct GqlData {
+        repository: Option<GqlRepo>,
+    }
+    #[derive(Deserialize)]
+    struct GqlRepo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<GqlPr>,
+    }
+    #[derive(Deserialize)]
+    struct GqlPr {
+        id: String,
+    }
+
+    let resp = c
+        .post("https://api.github.com/graphql")
+        .json(&serde_json::json!({
+            "query": query,
+            "variables": { "owner": owner, "repo": repo, "number": pr_number as i64 }
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    let gql: GqlResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse GraphQL response: {e}"))?;
+
+    let pr_id = gql
+        .data
+        .and_then(|d| d.repository)
+        .and_then(|r| r.pull_request)
+        .map(|p| p.id)
+        .ok_or("Could not find PR node ID")?;
+
+    // Now call the markPullRequestReadyForReview mutation
+    let mutation = r#"
+        mutation($prId: ID!) {
+            markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+                pullRequest { isDraft }
+            }
+        }
+    "#;
+
+    let resp2 = c
+        .post("https://api.github.com/graphql")
+        .json(&serde_json::json!({
+            "query": mutation,
+            "variables": { "prId": pr_id }
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp2.status().is_success() {
+        let text = resp2.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error: {text}"));
+    }
+
+    // Check for GraphQL errors
+    let body: serde_json::Value = resp2
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if let Some(errors) = body.get("errors") {
+        return Err(format!("GraphQL error: {errors}"));
+    }
+
+    Ok(())
+}
+
+// --- Editing ---
+
+pub async fn edit_pr_body(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    body: &str,
+    token: &str,
+) -> Result<(), String> {
+    let c = client(token)?;
+    let resp = c
+        .patch(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
+        ))
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+    Ok(())
+}
+
+pub async fn edit_issue_comment(
+    owner: &str,
+    repo: &str,
+    comment_id: u64,
+    body: &str,
+    token: &str,
+) -> Result<IssueComment, String> {
+    let c = client(token)?;
+    let resp = c
+        .patch(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/issues/comments/{comment_id}"
+        ))
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+
+    resp.json::<IssueComment>()
+        .await
+        .map_err(|e| format!("Failed to parse comment response: {e}"))
+}
+
+pub async fn edit_inline_comment(
+    owner: &str,
+    repo: &str,
+    comment_id: u64,
+    body: &str,
+    token: &str,
+) -> Result<InlineComment, String> {
+    let c = client(token)?;
+    let resp = c
+        .patch(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+        ))
+        .json(&serde_json::json!({ "body": body }))
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -612,4 +921,139 @@ pub async fn fetch_pr_head_sha(
         .map_err(|e| format!("Failed to parse PR detail: {e}"))?;
 
     Ok(detail.head.sha)
+}
+
+// --- Check / CI status ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    /// queued, in_progress, completed
+    pub status: String,
+    /// success, failure, neutral, cancelled, skipped, timed_out, action_required, null
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+}
+
+/// Overall check status for a PR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckStatus {
+    /// success, failure, pending
+    pub state: String,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub runs: Vec<CheckRun>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CombinedStatus {
+    statuses: Vec<StatusEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StatusEntry {
+    state: String,
+    context: String,
+    #[serde(default)]
+    target_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CheckRunsResponse {
+    check_runs: Vec<CheckRun>,
+}
+
+pub async fn fetch_check_status(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    token: &str,
+) -> Result<CheckStatus, String> {
+    let c = client(token)?;
+
+    let (status_resp, checks_resp) = tokio::join!(
+        c.get(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/commits/{git_ref}/status"
+        ))
+        .send(),
+        c.get(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/commits/{git_ref}/check-runs"
+        ))
+        .send(),
+    );
+
+    // Parse commit statuses
+    let statuses: Vec<StatusEntry> = match status_resp {
+        Ok(r) if r.status().is_success() => {
+            r.json::<CombinedStatus>()
+                .await
+                .map(|s| s.statuses)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    // Parse check runs
+    let check_runs: Vec<CheckRun> = match checks_resp {
+        Ok(r) if r.status().is_success() => {
+            r.json::<CheckRunsResponse>()
+                .await
+                .map(|s| s.check_runs)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    // Convert commit statuses into CheckRun-like entries
+    let mut all_runs: Vec<CheckRun> = statuses
+        .into_iter()
+        .map(|s| {
+            let (status, conclusion) = match s.state.as_str() {
+                "success" => ("completed".to_string(), Some("success".to_string())),
+                "failure" | "error" => ("completed".to_string(), Some("failure".to_string())),
+                _ => ("in_progress".to_string(), None),
+            };
+            CheckRun {
+                name: s.context,
+                status,
+                conclusion,
+                html_url: s.target_url,
+            }
+        })
+        .collect();
+
+    all_runs.extend(check_runs);
+
+    let total = all_runs.len();
+    let passed = all_runs
+        .iter()
+        .filter(|r| r.conclusion.as_deref() == Some("success") || r.conclusion.as_deref() == Some("skipped"))
+        .count();
+    let failed = all_runs
+        .iter()
+        .filter(|r| matches!(r.conclusion.as_deref(), Some("failure") | Some("timed_out") | Some("cancelled") | Some("action_required")))
+        .count();
+    let pending = total - passed - failed;
+
+    let state = if total == 0 {
+        "none".to_string()
+    } else if failed > 0 {
+        "failure".to_string()
+    } else if pending > 0 {
+        "pending".to_string()
+    } else {
+        "success".to_string()
+    };
+
+    Ok(CheckStatus {
+        state,
+        total,
+        passed,
+        failed,
+        pending,
+        runs: all_runs,
+    })
 }
