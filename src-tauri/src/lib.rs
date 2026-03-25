@@ -234,6 +234,39 @@ async fn post_inline_comment(
 }
 
 #[tauri::command]
+async fn merge_pr(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    merge_method: String,
+    token: String,
+) -> Result<github::MergeResult, String> {
+    github::merge_pr(&owner, &repo, pr_number, &merge_method, &token).await
+}
+
+#[tauri::command]
+async fn close_pr(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    token: String,
+) -> Result<(), String> {
+    github::close_pr(&owner, &repo, pr_number, &token).await
+}
+
+#[tauri::command]
+async fn reply_to_inline_comment(
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    body: String,
+    comment_id: u64,
+    token: String,
+) -> Result<github::InlineComment, String> {
+    github::reply_to_inline_comment(&owner, &repo, pr_number, &body, comment_id, &token).await
+}
+
+#[tauri::command]
 async fn mark_ready_for_review(
     owner: String,
     repo: String,
@@ -340,6 +373,9 @@ pub fn run() {
             post_comment,
             get_inline_comments,
             post_inline_comment,
+            reply_to_inline_comment,
+            merge_pr,
+            close_pr,
             get_pr_head_sha,
             get_check_status,
             mark_ready_for_review,

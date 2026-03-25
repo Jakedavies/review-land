@@ -239,6 +239,51 @@ function ResolvedThread(props: { comments: InlineComment[] }) {
   );
 }
 
+interface CommentThread {
+  root: InlineComment;
+  replies: InlineComment[];
+}
+
+function groupIntoThreads(comments: InlineComment[]): CommentThread[] {
+  const rootMap = new Map<number, CommentThread>();
+  const roots: InlineComment[] = [];
+
+  // First pass: identify roots
+  for (const c of comments) {
+    if (!c.in_reply_to_id) {
+      roots.push(c);
+      rootMap.set(c.id, { root: c, replies: [] });
+    }
+  }
+
+  // Second pass: attach replies
+  for (const c of comments) {
+    if (c.in_reply_to_id) {
+      const thread = rootMap.get(c.in_reply_to_id);
+      if (thread) {
+        thread.replies.push(c);
+      } else {
+        // Reply to a reply — find the thread it belongs to
+        let found = false;
+        for (const t of rootMap.values()) {
+          if (t.replies.some((r) => r.id === c.in_reply_to_id)) {
+            t.replies.push(c);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          // Orphan reply, treat as root
+          rootMap.set(c.id, { root: c, replies: [] });
+          roots.push(c);
+        }
+      }
+    }
+  }
+
+  return roots.map((r) => rootMap.get(r.id)!);
+}
+
 function HighlightedLine(props: {
   line: string;
   lang: string | null;
@@ -247,6 +292,10 @@ function HighlightedLine(props: {
   existingComments?: InlineComment[];
   username?: string;
   onEditComment?: (commentId: number, body: string) => Promise<void>;
+  onReply?: (commentId: number, body: string) => Promise<void>;
+  replyingTo?: number | null;
+  onSetReplyingTo?: (commentId: number | null) => void;
+  collaborators?: Collaborator[];
 }) {
   const [hovered, setHovered] = createSignal(false);
   const [editingId, setEditingId] = createSignal<number | null>(null);
@@ -335,75 +384,115 @@ function HighlightedLine(props: {
         {(() => {
           const active = () => props.existingComments!.filter((c) => !c.is_resolved);
           const resolved = () => props.existingComments!.filter((c) => c.is_resolved);
+          const activeThreads = () => groupIntoThreads(active());
+          const resolvedComments = () => resolved();
           return (
             <div class="ml-10 mr-3 my-1 space-y-1">
-              <For each={active()}>
-                {(comment) => (
-                  <div class="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs">
-                    <div class="flex items-center gap-1.5 mb-1">
-                      <img
-                        src={comment.user.avatar_url}
-                        class="w-4 h-4 rounded-full"
-                        alt=""
-                      />
-                      <span class="font-medium text-gray-200">
-                        {comment.user.login}
-                      </span>
-                      <span class="text-gray-500">
-                        {new Date(comment.created_at).toLocaleDateString()}
-                      </span>
-                      <Show when={props.username && comment.user.login === props.username && props.onEditComment}>
-                        <button
-                          onClick={() => {
-                            setEditingId(comment.id);
-                            setEditText(comment.body);
-                          }}
-                          class="text-[10px] text-gray-500 hover:text-gray-300 ml-auto transition-colors"
-                        >
-                          Edit
-                        </button>
+              <For each={activeThreads()}>
+                {(thread) => {
+                  const allComments = () => [thread.root, ...thread.replies];
+                  const threadRootId = () => thread.root.id;
+                  return (
+                    <div class="bg-gray-800 border border-gray-700 rounded">
+                      <For each={allComments()}>
+                        {(comment, index) => (
+                          <div
+                            class={`px-2 py-1.5 text-xs ${index() > 0 ? "border-t border-gray-700/50" : ""}`}
+                          >
+                            <div class="flex items-center gap-1.5 mb-1">
+                              <img
+                                src={comment.user.avatar_url}
+                                class="w-4 h-4 rounded-full"
+                                alt=""
+                              />
+                              <span class="font-medium text-gray-200">
+                                {comment.user.login}
+                              </span>
+                              <span class="text-gray-500">
+                                {new Date(comment.created_at).toLocaleDateString()}
+                              </span>
+                              <Show when={props.username && comment.user.login === props.username && props.onEditComment}>
+                                <button
+                                  onClick={() => {
+                                    setEditingId(comment.id);
+                                    setEditText(comment.body);
+                                  }}
+                                  class="text-[10px] text-gray-500 hover:text-gray-300 ml-auto transition-colors"
+                                >
+                                  Edit
+                                </button>
+                              </Show>
+                            </div>
+                            <Show when={editingId() === comment.id} fallback={
+                              <CommentBody body={comment.body} class="text-gray-300 whitespace-pre-wrap text-xs" />
+                            }>
+                              <div class="space-y-1.5 mt-1">
+                                <textarea
+                                  value={editText()}
+                                  onInput={(e) => setEditText(e.currentTarget.value)}
+                                  disabled={editSaving()}
+                                  class="w-full bg-gray-950 border border-gray-700 rounded p-1.5 text-xs text-gray-200 placeholder-gray-500 resize-y min-h-[40px] focus:outline-none focus:border-blue-600"
+                                />
+                                <div class="flex gap-1.5">
+                                  <button
+                                    onClick={async () => {
+                                      setEditSaving(true);
+                                      try {
+                                        await props.onEditComment!(comment.id, editText());
+                                        setEditingId(null);
+                                      } finally {
+                                        setEditSaving(false);
+                                      }
+                                    }}
+                                    disabled={editSaving()}
+                                    class="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                                  >
+                                    {editSaving() ? "Saving..." : "Save"}
+                                  </button>
+                                  <button
+                                    onClick={() => setEditingId(null)}
+                                    class="px-2 py-0.5 rounded text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+                      {/* Reply button and reply box */}
+                      <Show when={props.onReply}>
+                        <div class="px-2 py-1.5 border-t border-gray-700/50">
+                          <Show
+                            when={props.replyingTo === threadRootId()}
+                            fallback={
+                              <button
+                                onClick={() => props.onSetReplyingTo?.(threadRootId())}
+                                class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
+                              >
+                                Reply
+                              </button>
+                            }
+                          >
+                            <CommentBox
+                              onSubmit={async (body) => {
+                                await props.onReply!(threadRootId(), body);
+                              }}
+                              placeholder="Write a reply..."
+                              label="Reply"
+                              onCancel={() => props.onSetReplyingTo?.(null)}
+                              collaborators={props.collaborators}
+                            />
+                          </Show>
+                        </div>
                       </Show>
                     </div>
-                    <Show when={editingId() === comment.id} fallback={
-                      <CommentBody body={comment.body} class="text-gray-300 whitespace-pre-wrap text-xs" />
-                    }>
-                      <div class="space-y-1.5 mt-1">
-                        <textarea
-                          value={editText()}
-                          onInput={(e) => setEditText(e.currentTarget.value)}
-                          disabled={editSaving()}
-                          class="w-full bg-gray-950 border border-gray-700 rounded p-1.5 text-xs text-gray-200 placeholder-gray-500 resize-y min-h-[40px] focus:outline-none focus:border-blue-600"
-                        />
-                        <div class="flex gap-1.5">
-                          <button
-                            onClick={async () => {
-                              setEditSaving(true);
-                              try {
-                                await props.onEditComment!(comment.id, editText());
-                                setEditingId(null);
-                              } finally {
-                                setEditSaving(false);
-                              }
-                            }}
-                            disabled={editSaving()}
-                            class="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
-                          >
-                            {editSaving() ? "Saving..." : "Save"}
-                          </button>
-                          <button
-                            onClick={() => setEditingId(null)}
-                            class="px-2 py-0.5 rounded text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    </Show>
-                  </div>
-                )}
+                  );
+                }}
               </For>
-              <Show when={resolved().length > 0}>
-                <ResolvedThread comments={resolved()} />
+              <Show when={resolvedComments().length > 0}>
+                <ResolvedThread comments={resolvedComments()} />
               </Show>
             </div>
           );
@@ -430,6 +519,7 @@ function FileSection(props: {
   const [activeCommentLine, setActiveCommentLine] = createSignal<number | null>(
     null,
   );
+  const [replyingTo, setReplyingTo] = createSignal<number | null>(null);
   const f = props.file;
   const lang = () => langFromFilename(f.filename);
 
@@ -464,6 +554,20 @@ function FileSection(props: {
       token: props.token,
     });
     setActiveCommentLine(null);
+    props.onInlineCommentsChange?.();
+  };
+
+  const handleReply = async (commentId: number, body: string) => {
+    if (!canComment()) return;
+    await invoke("reply_to_inline_comment", {
+      owner: props.owner,
+      repo: props.repo,
+      prNumber: props.prNumber,
+      body,
+      commentId,
+      token: props.token,
+    });
+    setReplyingTo(null);
     props.onInlineCommentsChange?.();
   };
 
@@ -518,6 +622,10 @@ function FileSection(props: {
                       }
                       username={props.username}
                       onEditComment={props.onEditInlineComment}
+                      onReply={canComment() ? handleReply : undefined}
+                      replyingTo={replyingTo()}
+                      onSetReplyingTo={setReplyingTo}
+                      collaborators={props.collaborators}
                     />
                     <Show
                       when={

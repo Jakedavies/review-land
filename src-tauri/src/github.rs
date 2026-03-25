@@ -705,6 +705,103 @@ pub async fn post_pr_inline_comment(
         .map_err(|e| format!("Failed to parse inline comment response: {e}"))
 }
 
+pub async fn reply_to_inline_comment(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    body: &str,
+    comment_id: u64,
+    token: &str,
+) -> Result<InlineComment, String> {
+    let c = client(token)?;
+    let resp = c
+        .post(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies"
+        ))
+        .json(&serde_json::json!({
+            "body": body,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+
+    resp.json::<InlineComment>()
+        .await
+        .map_err(|e| format!("Failed to parse inline comment response: {e}"))
+}
+
+// --- Merge / Close PR ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
+    pub sha: Option<String>,
+    pub merged: bool,
+    pub message: String,
+}
+
+pub async fn merge_pr(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    merge_method: &str,
+    token: &str,
+) -> Result<MergeResult, String> {
+    let c = client(token)?;
+    let resp = c
+        .put(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/merge"
+        ))
+        .json(&serde_json::json!({
+            "merge_method": merge_method,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+
+    resp.json::<MergeResult>()
+        .await
+        .map_err(|e| format!("Failed to parse merge response: {e}"))
+}
+
+pub async fn close_pr(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    token: &str,
+) -> Result<(), String> {
+    let c = client(token)?;
+    let resp = c
+        .patch(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
+        ))
+        .json(&serde_json::json!({
+            "state": "closed",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API error {status}: {text}"));
+    }
+
+    Ok(())
+}
+
 // --- Draft / Ready for review ---
 
 pub async fn mark_pr_ready_for_review(

@@ -129,6 +129,8 @@ function DiffPage() {
   }
 
   const [isDraft, setIsDraft] = createSignal(matchedPr?.draft ?? false);
+  const [prClosed, setPrClosed] = createSignal(matchedPr?.state === "closed");
+  const [prMerged, setPrMerged] = createSignal(false);
 
   const prNumber = () => parseInt(params.number);
 
@@ -529,6 +531,115 @@ function DiffPage() {
           >
             Submit Review
           </button>
+        </Show>
+        <Show when={token() && !prClosed() && !prMerged()}>
+          {(() => {
+            const [mergeOpen, setMergeOpen] = createSignal(false);
+            const [merging, setMerging] = createSignal(false);
+            const [closing, setClosing] = createSignal(false);
+            const [mergeError, setMergeError] = createSignal("");
+
+            const doMerge = async (method: string) => {
+              setMerging(true);
+              setMergeError("");
+              try {
+                await invoke("merge_pr", {
+                  owner: params.owner,
+                  repo: params.repo,
+                  prNumber: prNumber(),
+                  mergeMethod: method,
+                  token: token(),
+                });
+                setPrMerged(true);
+                setMergeOpen(false);
+                prDataLoadData?.();
+              } catch (e) {
+                setMergeError(`${e}`);
+              } finally {
+                setMerging(false);
+              }
+            };
+
+            const doClose = async () => {
+              setClosing(true);
+              setMergeError("");
+              try {
+                await invoke("close_pr", {
+                  owner: params.owner,
+                  repo: params.repo,
+                  prNumber: prNumber(),
+                  token: token(),
+                });
+                setPrClosed(true);
+                setMergeOpen(false);
+                prDataLoadData?.();
+              } catch (e) {
+                setMergeError(`${e}`);
+              } finally {
+                setClosing(false);
+              }
+            };
+
+            return (
+              <div class="relative">
+                <button
+                  onClick={() => setMergeOpen(!mergeOpen())}
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium bg-green-800 border border-green-700 text-green-200 hover:bg-green-700 transition-colors"
+                >
+                  Merge
+                </button>
+                <Show when={mergeOpen()}>
+                  <div class="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 p-2 w-52 space-y-1">
+                    <button
+                      onClick={() => doMerge("merge")}
+                      disabled={merging()}
+                      class="w-full text-left px-2 py-1.5 rounded text-xs text-gray-200 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      <div class="font-medium">Create merge commit</div>
+                      <div class="text-gray-500 text-[10px]">All commits will be added</div>
+                    </button>
+                    <button
+                      onClick={() => doMerge("squash")}
+                      disabled={merging()}
+                      class="w-full text-left px-2 py-1.5 rounded text-xs text-gray-200 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      <div class="font-medium">Squash and merge</div>
+                      <div class="text-gray-500 text-[10px]">Commits will be squashed</div>
+                    </button>
+                    <button
+                      onClick={() => doMerge("rebase")}
+                      disabled={merging()}
+                      class="w-full text-left px-2 py-1.5 rounded text-xs text-gray-200 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      <div class="font-medium">Rebase and merge</div>
+                      <div class="text-gray-500 text-[10px]">Commits will be rebased</div>
+                    </button>
+                    <div class="border-t border-gray-700 my-1" />
+                    <button
+                      onClick={doClose}
+                      disabled={closing()}
+                      class="w-full text-left px-2 py-1.5 rounded text-xs text-red-400 hover:bg-red-950 transition-colors disabled:opacity-50"
+                    >
+                      {closing() ? "Closing..." : "Close pull request"}
+                    </button>
+                    <Show when={mergeError()}>
+                      <div class="text-[10px] text-red-400 px-2 py-1">{mergeError()}</div>
+                    </Show>
+                  </div>
+                </Show>
+              </div>
+            );
+          })()}
+        </Show>
+        <Show when={prMerged()}>
+          <span class="px-3 py-1.5 rounded-lg text-xs font-medium bg-purple-900 border border-purple-800 text-purple-300">
+            Merged
+          </span>
+        </Show>
+        <Show when={prClosed() && !prMerged()}>
+          <span class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-900 border border-red-800 text-red-300">
+            Closed
+          </span>
         </Show>
         <button
           onClick={() => openUrl(ghUrl())}
