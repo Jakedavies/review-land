@@ -40,6 +40,8 @@ function Settings() {
         refresh_interval_secs: refreshInterval(),
       },
     });
+    // Clear dashboard cache when settings change (repos/token may have changed)
+    await invoke("clear_dashboard_cache").catch(() => {});
     setStatus("Settings saved!");
     setTimeout(() => setStatus(""), 2000);
   };

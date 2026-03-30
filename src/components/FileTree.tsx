@@ -8,6 +8,7 @@ interface PrFile {
 
 interface FileViewEntry {
   sha: string;
+  commit_sha?: string;
 }
 
 interface TreeNode {

@@ -307,6 +307,49 @@ async fn fetch_latest_review_state(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrCommit {
+    pub sha: String,
+    pub commit: CommitDetail,
+    pub author: Option<GitHubUser>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDetail {
+    pub message: String,
+    pub author: CommitAuthor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitAuthor {
+    pub name: String,
+    pub date: String,
+}
+
+pub async fn fetch_pr_commits(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    token: &str,
+) -> Result<Vec<PrCommit>, String> {
+    let c = client(token)?;
+    let resp = c
+        .get(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/commits?per_page=100"
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+
+    resp.json::<Vec<PrCommit>>()
+        .await
+        .map_err(|e| format!("Failed to parse PR commits: {e}"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrFile {
     pub sha: String,
     pub filename: String,
@@ -316,6 +359,40 @@ pub struct PrFile {
     pub changes: u64,
     pub patch: Option<String>,
     pub previous_filename: Option<String>,
+}
+
+/// Compare two commits and return per-file diffs.
+pub async fn fetch_compare(
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+    token: &str,
+) -> Result<Vec<PrFile>, String> {
+    let c = client(token)?;
+    let resp = c
+        .get(format!(
+            "{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}?per_page=100"
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+
+    #[derive(Deserialize)]
+    struct CompareResponse {
+        files: Option<Vec<PrFile>>,
+    }
+
+    let compare: CompareResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse compare response: {e}"))?;
+
+    Ok(compare.files.unwrap_or_default())
 }
 
 pub async fn fetch_pr_files(

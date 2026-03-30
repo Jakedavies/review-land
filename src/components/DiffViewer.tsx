@@ -528,6 +528,9 @@ function FileSection(props: {
   const commentsForFile = () =>
     (props.inlineComments ?? []).filter((c) => c.path === f.filename);
 
+  const outdatedThreads = () =>
+    groupIntoThreads(commentsForFile().filter((c) => c.line == null));
+
   const commentsForLine = (lineNum: number, side: "LEFT" | "RIGHT") =>
     commentsForFile().filter((c) => {
       if (side === "LEFT") {
@@ -649,6 +652,75 @@ function FileSection(props: {
             </pre>
           </div>
         </Show>
+        <Show when={outdatedThreads().length > 0}>
+          <div class="px-3 py-2 space-y-1.5">
+            <For each={outdatedThreads()}>
+              {(thread) => {
+                const allComments = [thread.root, ...thread.replies];
+                if (thread.root.is_resolved) {
+                  return <ResolvedThread comments={allComments} />;
+                }
+                return <OutdatedThread comments={allComments} username={props.username} onReply={canComment() ? handleReply : undefined} replyingTo={replyingTo()} onSetReplyingTo={setReplyingTo} collaborators={props.collaborators} />;
+              }}
+            </For>
+          </div>
+        </Show>
+      </Show>
+    </div>
+  );
+}
+
+function OutdatedThread(props: {
+  comments: InlineComment[];
+  username?: string;
+  onReply?: (commentId: number, body: string) => Promise<void>;
+  replyingTo?: number | null;
+  onSetReplyingTo?: (id: number | null) => void;
+  collaborators?: Collaborator[];
+}) {
+  const [open, setOpen] = createSignal(false);
+  const threadRootId = () => props.comments[0]?.id;
+  return (
+    <div class="border border-gray-700/50 rounded text-xs">
+      <button
+        class="w-full flex items-center gap-1.5 px-2 py-1 text-left text-gray-500 hover:text-gray-400 transition-colors"
+        onClick={() => setOpen(!open())}
+      >
+        <span class="text-[10px]">{open() ? "\u25BC" : "\u25B6"}</span>
+        <span class="px-1 py-0.5 rounded text-[9px] font-medium bg-yellow-900/50 text-yellow-400">Outdated</span>
+        <span>{props.comments.length} comment{props.comments.length !== 1 ? "s" : ""}</span>
+        <span class="text-gray-600 truncate max-w-xs">&mdash; {props.comments[0].user.login}</span>
+      </button>
+      <Show when={open()}>
+        <div class="px-2 pb-1.5 space-y-1">
+          <For each={props.comments}>
+            {(comment, index) => (
+              <div class={`bg-gray-800/50 border border-gray-700/50 rounded px-2 py-1.5 ${index() > 0 ? "border-t border-gray-700/50" : ""}`}>
+                <div class="flex items-center gap-1.5 mb-1">
+                  <img src={comment.user.avatar_url} class="w-4 h-4 rounded-full" alt="" />
+                  <span class="font-medium text-gray-400">{comment.user.login}</span>
+                  <span class="text-gray-600">{new Date(comment.created_at).toLocaleDateString()}</span>
+                </div>
+                <CommentBody body={comment.body} class="text-gray-400 whitespace-pre-wrap text-xs" />
+              </div>
+            )}
+          </For>
+          <Show when={props.onReply}>
+            <div class="px-2 py-1">
+              <Show when={props.replyingTo === threadRootId()} fallback={
+                <button class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors" onClick={() => props.onSetReplyingTo?.(threadRootId())}>Reply</button>
+              }>
+                <CommentBox
+                  onSubmit={async (body) => { await props.onReply!(threadRootId(), body); }}
+                  placeholder="Write a reply..."
+                  label="Reply"
+                  onCancel={() => props.onSetReplyingTo?.(null)}
+                  collaborators={props.collaborators}
+                />
+              </Show>
+            </div>
+          </Show>
+        </div>
       </Show>
     </div>
   );

@@ -31,6 +31,8 @@ pub struct AppSettings {
 pub struct FileViewEntry {
     pub sha: String,
     pub viewed_at: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,5 +1,6 @@
 import { createSignal, createContext, useContext, onMount, onCleanup, createMemo, type ParentProps, type Accessor } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 
 interface RepoConfig {
   owner: string;
@@ -61,6 +62,13 @@ export interface ActivitySummary {
   new_reviews: { id: number; user: { login: string }; state: string }[];
 }
 
+interface DashboardCache {
+  fetched_at: string;
+  prs: PrWithMeta[];
+  activity: Record<string, ActivitySummary>;
+  checks: Record<string, CheckStatus>;
+}
+
 interface PRDataContextValue {
   prs: Accessor<PrWithMeta[]>;
   activity: Accessor<Record<string, ActivitySummary>>;
@@ -84,6 +92,53 @@ export function PRDataProvider(props: ParentProps) {
   const [error, setError] = createSignal("");
 
   let refreshTimer: ReturnType<typeof setInterval>;
+  let isFirstLoad = true;
+
+  const notify = async (title: string, body: string) => {
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const permission = await requestPermission();
+        granted = permission === "granted";
+      }
+      if (granted) {
+        sendNotification({ title, body });
+      }
+    } catch {
+      // Notifications not available
+    }
+  };
+
+  const checkForNotifications = (oldPrs: PrWithMeta[], newPrs: PrWithMeta[], username: string) => {
+    const oldByUrl = new Map(oldPrs.map((pr) => [pr.html_url, pr]));
+
+    for (const pr of newPrs) {
+      const old = oldByUrl.get(pr.html_url);
+      if (!old) {
+        // New PR opened
+        notify(
+          "New PR opened",
+          `${pr.repo_owner}/${pr.repo_name}#${pr.number}: ${pr.title}`,
+        );
+      } else if (old.review_state !== "APPROVED" && pr.review_state === "APPROVED" && username && pr.user.login === username) {
+        // My PR got approved by someone else
+        notify(
+          "PR approved",
+          `${pr.repo_owner}/${pr.repo_name}#${pr.number}: ${pr.title}`,
+        );
+      } else if (username && pr.user.login === username && pr.comments > old.comments) {
+        // New comments on a PR I authored
+        const newCount = pr.comments - old.comments;
+        notify(
+          `${newCount} new comment${newCount > 1 ? "s" : ""} on your PR`,
+          `${pr.repo_owner}/${pr.repo_name}#${pr.number}: ${pr.title}`,
+        );
+      }
+    }
+  };
+
+  // Expose for testing: call window.__testNotification() in dev console
+  (window as any).__testNotification = () => notify("Test Notification", "PR Review Land notifications are working!");
 
   const loadData = async () => {
     const s = await invoke<AppSettings>("get_settings");
@@ -94,12 +149,32 @@ export function PRDataProvider(props: ParentProps) {
       return;
     }
 
-    setLoading(true);
+    // Phase 1: Load from cache instantly
+    let hasCache = false;
+    try {
+      const cached = await invoke<DashboardCache | null>("get_dashboard_cached");
+      if (cached) {
+        hasCache = true;
+        const vs = await invoke<ViewState>("get_last_viewed");
+        setPrs(cached.prs);
+        setActivity(cached.activity);
+        setChecks(cached.checks);
+        setLastViewed(vs.last_viewed);
+        setLoading(false);
+      }
+    } catch {
+      // Cache read failed, proceed to fresh fetch
+    }
+
+    if (!hasCache) {
+      setLoading(true);
+    }
     setError("");
 
+    // Phase 2: Refresh from GitHub in background
     try {
-      const [fetchedPrs, vs] = await Promise.all([
-        invoke<PrWithMeta[]>("get_open_prs", {
+      const [dashboard, vs] = await Promise.all([
+        invoke<DashboardCache>("refresh_dashboard", {
           repos: s.repos,
           token: s.github_token,
           username: s.username,
@@ -107,49 +182,21 @@ export function PRDataProvider(props: ParentProps) {
         invoke<ViewState>("get_last_viewed"),
       ]);
 
-      setPrs(fetchedPrs);
-      setLastViewed(vs.last_viewed);
-
-      const activityMap: Record<string, ActivitySummary> = {};
-      const activityPromises = fetchedPrs
-        .filter((pr) => vs.last_viewed[pr.html_url])
-        .map(async (pr) => {
-          try {
-            const summary = await invoke<ActivitySummary>(
-              "get_activity_summary",
-              {
-                owner: pr.repo_owner,
-                repo: pr.repo_name,
-                prNumber: pr.number,
-                since: vs.last_viewed[pr.html_url],
-                token: s.github_token,
-              },
-            );
-            activityMap[pr.html_url] = summary;
-          } catch {
-            // Ignore individual PR activity fetch failures
-          }
-        });
-
-      await Promise.all(activityPromises);
-      setActivity(activityMap);
-
-      // Fetch check statuses in background, updating incrementally
-      setChecks({});
-      for (const pr of fetchedPrs) {
-        if (!pr.head?.sha) continue;
-        invoke<CheckStatus>("get_check_status", {
-          owner: pr.repo_owner,
-          repo: pr.repo_name,
-          gitRef: pr.head.sha,
-          token: s.github_token,
-        }).then((status) => {
-          setChecks((prev) => ({ ...prev, [pr.html_url]: status }));
-        }).catch(() => {});
+      if (!isFirstLoad) {
+        checkForNotifications(prs(), dashboard.prs, s.username);
       }
+      isFirstLoad = false;
+
+      setPrs(dashboard.prs);
+      setActivity(dashboard.activity);
+      setChecks(dashboard.checks);
+      setLastViewed(vs.last_viewed);
     } catch (e) {
-      console.error("Failed to load PRs:", e);
-      setError(`Failed to load PRs: ${e}`);
+      if (!hasCache) {
+        console.error("Failed to load PRs:", e);
+        setError(`Failed to load PRs: ${e}`);
+      }
+      // If we have cache, silently use stale data
     } finally {
       setLoading(false);
     }

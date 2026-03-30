@@ -31,6 +31,24 @@ interface ReviewComment {
   submitted_at?: string;
 }
 
+interface PrCommit {
+  sha: string;
+  commit: { message: string; author: { name: string; date: string } };
+  author: { login: string; avatar_url: string } | null;
+}
+
+interface PrDetailCache {
+  fetched_at: string;
+  head_sha: string;
+  files: PrFile[];
+  inline_comments: InlineComment[];
+  issue_comments: IssueComment[];
+  reviews: ReviewComment[];
+  check_status: { state: string; total: number; passed: number; failed: number; pending: number } | null;
+  collaborators: Collaborator[];
+  commits: PrCommit[];
+}
+
 function DiffPage() {
   const params = useParams<{ owner: string; repo: string; number: string }>();
   const navigate = useNavigate();
@@ -48,6 +66,10 @@ function DiffPage() {
   const [activeFileIndex, setActiveFileIndex] = createSignal(0);
   const [viewedFiles, setViewedFiles] = createSignal<Record<string, FileViewEntry>>({});
   const [checkStatus, setCheckStatus] = createSignal<{ state: string; total: number; passed: number; failed: number; pending: number } | null>(null);
+  const [commits, setCommits] = createSignal<PrCommit[]>([]);
+  const [diffMode, setDiffMode] = createSignal<"full" | "incremental">("full");
+  const [incrementalFiles, setIncrementalFiles] = createSignal<PrFile[] | null>(null);
+  const [incrementalLoading, setIncrementalLoading] = createSignal(false);
 
   const activeFile = () => files()[activeFileIndex()]?.filename;
 
@@ -61,10 +83,11 @@ function DiffPage() {
         prNumber: prNumber(),
         filename,
         sha: file.sha,
+        commitSha: headSha() || null,
       });
       setViewedFiles((prev) => ({
         ...prev,
-        [filename]: { sha: file.sha },
+        [filename]: { sha: file.sha, commit_sha: headSha() || undefined },
       }));
     } catch (e) {
       console.error("Failed to mark file viewed:", e);
@@ -100,6 +123,73 @@ function DiffPage() {
     scrollToTop();
   };
 
+  // Check if any file has been viewed at a previous commit (incremental diff available)
+  const hasIncrementalData = () => {
+    const viewed = viewedFiles();
+    const currentHead = headSha();
+    if (!currentHead) return false;
+    return files().some((f) => {
+      const entry = viewed[f.filename];
+      return entry?.commit_sha && entry.commit_sha !== currentHead && entry.sha !== f.sha;
+    });
+  };
+
+  const fetchIncrementalDiff = async () => {
+    // Find the oldest commit_sha among viewed files that differs from current head
+    const viewed = viewedFiles();
+    const currentHead = headSha();
+    if (!currentHead || !token()) return;
+
+    // Use the most common previous commit_sha (they should mostly be the same)
+    const commitShas = files()
+      .map((f) => viewed[f.filename]?.commit_sha)
+      .filter((sha): sha is string => !!sha && sha !== currentHead);
+
+    if (commitShas.length === 0) {
+      setIncrementalFiles([]);
+      return;
+    }
+
+    // Use the oldest (first) viewed commit as the base
+    const baseSha = commitShas[0];
+
+    setIncrementalLoading(true);
+    try {
+      const result = await invoke<PrFile[]>("get_compare_files", {
+        owner: params.owner,
+        repo: params.repo,
+        base: baseSha,
+        head: currentHead,
+        token: token(),
+      });
+      setIncrementalFiles(result);
+    } catch (e) {
+      console.error("Failed to fetch incremental diff:", e);
+      setIncrementalFiles(null);
+      setDiffMode("full");
+    } finally {
+      setIncrementalLoading(false);
+    }
+  };
+
+  const toggleDiffMode = async () => {
+    if (diffMode() === "full") {
+      if (!incrementalFiles()) {
+        await fetchIncrementalDiff();
+      }
+      setDiffMode("incremental");
+    } else {
+      setDiffMode("full");
+    }
+  };
+
+  const displayFiles = () => {
+    if (diffMode() === "incremental" && incrementalFiles()) {
+      return incrementalFiles()!;
+    }
+    return files();
+  };
+
   // Review modal state
   const [reviewModalOpen, setReviewModalOpen] = createSignal(false);
   const [reviewModalBody, setReviewModalBody] = createSignal("");
@@ -112,11 +202,13 @@ function DiffPage() {
     ? T | undefined
     : undefined;
   let prDataLoadData: (() => Promise<void>) | undefined;
+  let prLastViewed: ReturnType<typeof usePRData>["lastViewed"] | undefined;
 
   try {
-    const { prs, loadData: ld } = usePRData();
+    const { prs, loadData: ld, lastViewed: lv } = usePRData();
     prDataAvailable = true;
     prDataLoadData = ld;
+    prLastViewed = lv;
     const found = prs().find(
       (p) =>
         p.repo_owner === params.owner &&
@@ -177,96 +269,81 @@ function DiffPage() {
     }
   };
 
+  const applyDetailData = (detail: PrDetailCache, viewed: Record<string, FileViewEntry>) => {
+    setFiles(detail.files);
+    setHeadSha(detail.head_sha);
+    setInlineComments(detail.inline_comments);
+    setComments(detail.issue_comments);
+    setReviews(detail.reviews);
+    setCheckStatus(detail.check_status);
+    setCollaborators(detail.collaborators);
+    setCommits(detail.commits || []);
+    setViewedFiles(viewed);
+
+    // Default to first unviewed file, or first file if all viewed
+    if (detail.files.length > 0) {
+      const firstUnviewed = detail.files.findIndex((f) => {
+        const entry = viewed[f.filename];
+        return !entry || entry.sha !== f.sha;
+      });
+      const startIdx = firstUnviewed >= 0 ? firstUnviewed : 0;
+      setActiveFileIndex(startIdx);
+      markFileViewed(detail.files[startIdx].filename);
+    }
+  };
+
   onMount(async () => {
     try {
       const settings = await invoke<AppSettings>("get_settings");
       setToken(settings.github_token);
       setUsername(settings.username);
 
-      const [result, sha] = await Promise.all([
-        invoke<PrFile[]>("get_pr_files", {
-          owner: params.owner,
-          repo: params.repo,
-          prNumber: prNumber(),
-          token: settings.github_token,
-        }),
-        invoke<string>("get_pr_head_sha", {
-          owner: params.owner,
-          repo: params.repo,
-          prNumber: prNumber(),
-          token: settings.github_token,
-        }),
-      ]);
-      setFiles(result);
-      setHeadSha(sha);
-
-      // Fetch check status (non-blocking)
-      invoke<{ state: string; total: number; passed: number; failed: number; pending: number }>(
-        "get_check_status",
-        { owner: params.owner, repo: params.repo, gitRef: sha, token: settings.github_token },
-      ).then(setCheckStatus).catch(() => {});
-
-      // Fetch inline comments
-      const comments = await invoke<InlineComment[]>("get_inline_comments", {
-        owner: params.owner,
-        repo: params.repo,
-        prNumber: prNumber(),
-        token: settings.github_token,
-      });
-      setInlineComments(comments);
-
-      // Fetch top-level comments and reviews
-      const [topComments, prReviews] = await Promise.all([
-        invoke<IssueComment[]>("get_comments", {
-          owner: params.owner,
-          repo: params.repo,
-          prNumber: prNumber(),
-          token: settings.github_token,
-        }),
-        invoke<ReviewComment[]>("get_reviews", {
-          owner: params.owner,
-          repo: params.repo,
-          prNumber: prNumber(),
-          token: settings.github_token,
-        }),
-      ]);
-      setComments(topComments);
-      setReviews(prReviews);
-
-      // Fetch file viewed state
-      let viewed: Record<string, FileViewEntry> = {};
+      // Phase 1: Load from cache instantly
+      let hasCache = false;
       try {
-        viewed = await invoke<Record<string, FileViewEntry>>("get_files_viewed", {
+        const cached = await invoke<PrDetailCache | null>("get_pr_detail_cached", {
           owner: params.owner,
           repo: params.repo,
           prNumber: prNumber(),
         });
-        setViewedFiles(viewed);
-      } catch (e) {
-        console.error("Failed to fetch file viewed state:", e);
-      }
-
-      // Default to first unviewed file, or first file if all viewed
-      if (result.length > 0) {
-        const firstUnviewed = result.findIndex((f) => {
-          const entry = viewed[f.filename];
-          return !entry || entry.sha !== f.sha;
-        });
-        const startIdx = firstUnviewed >= 0 ? firstUnviewed : 0;
-        setActiveFileIndex(startIdx);
-        markFileViewed(result[startIdx].filename);
-      }
-
-      // Fetch collaborators for @mention autocomplete
-      try {
-        const collabs = await invoke<Collaborator[]>("get_collaborators", {
-          owner: params.owner,
-          repo: params.repo,
-          token: settings.github_token,
-        });
-        setCollaborators(collabs);
+        if (cached) {
+          hasCache = true;
+          let viewed: Record<string, FileViewEntry> = {};
+          try {
+            viewed = await invoke<Record<string, FileViewEntry>>("get_files_viewed", {
+              owner: params.owner,
+              repo: params.repo,
+              prNumber: prNumber(),
+            });
+          } catch {}
+          applyDetailData(cached, viewed);
+          setLoading(false);
+        }
       } catch {
-        // Non-critical — mentions just won't autocomplete
+        // Cache read failed, proceed to fresh fetch
+      }
+
+      // Phase 2: Refresh from GitHub
+      try {
+        const [detail, viewed] = await Promise.all([
+          invoke<PrDetailCache>("refresh_pr_detail", {
+            owner: params.owner,
+            repo: params.repo,
+            prNumber: prNumber(),
+            token: settings.github_token,
+          }),
+          invoke<Record<string, FileViewEntry>>("get_files_viewed", {
+            owner: params.owner,
+            repo: params.repo,
+            prNumber: prNumber(),
+          }),
+        ]);
+        applyDetailData(detail, viewed);
+      } catch (e) {
+        console.error("Failed to refresh PR detail:", e);
+        if (!hasCache) {
+          setError(`Failed to load diff: ${e}`);
+        }
       }
     } catch (e) {
       console.error("Failed to load diff:", e);
@@ -291,7 +368,9 @@ function DiffPage() {
 
   type TimelineItem =
     | { kind: "comment"; id: number; user: { login: string; avatar_url: string }; body: string; date: string }
-    | { kind: "review"; id: number; user: { login: string; avatar_url: string }; state: string; body?: string; date: string };
+    | { kind: "review"; id: number; user: { login: string; avatar_url: string }; state: string; body?: string; date: string }
+    | { kind: "commit"; id: number; sha: string; message: string; user: { login: string; avatar_url: string } | null; authorName: string; date: string }
+    | { kind: "last-viewed"; id: number; date: string };
 
   const timeline = () => {
     const items: TimelineItem[] = [];
@@ -302,8 +381,59 @@ function DiffPage() {
       if (r.state === "PENDING") continue;
       items.push({ kind: "review", id: r.id, user: r.user, state: r.state, body: r.body || undefined, date: r.submitted_at || "" });
     }
+    for (const c of commits()) {
+      items.push({
+        kind: "commit",
+        id: 0, // commits don't have numeric IDs
+        sha: c.sha,
+        message: c.commit.message.split("\n")[0], // first line only
+        user: c.author,
+        authorName: c.commit.author.name,
+        date: c.commit.author.date,
+      });
+    }
+
+    // Insert "last viewed" marker
+    const prUrl = `https://github.com/${params.owner}/${params.repo}/pull/${params.number}`;
+    const viewedAt = prLastViewed?.()?.[prUrl];
+    if (viewedAt) {
+      items.push({ kind: "last-viewed", id: -1, date: viewedAt });
+    }
+
     items.sort((a, b) => a.date.localeCompare(b.date));
     return items;
+  };
+
+  const newItems = () => {
+    const items = timeline();
+    const markerIdx = items.findIndex((i) => i.kind === "last-viewed");
+    if (markerIdx < 0) return [];
+    return items.slice(markerIdx + 1).filter((i) => i.kind !== "last-viewed");
+  };
+
+  const [newItemIndex, setNewItemIndex] = createSignal(-1);
+
+  const scrollToTimelineItem = (idx: number) => {
+    const items = newItems();
+    if (idx < 0 || idx >= items.length) return;
+    setNewItemIndex(idx);
+    const item = items[idx];
+    const elId = item.kind === "commit" ? `timeline-commit-${item.sha}` : `timeline-${item.kind}-${item.id}`;
+    document.getElementById(elId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const jumpToNextNew = () => {
+    const items = newItems();
+    if (items.length === 0) return;
+    const next = Math.min(newItemIndex() + 1, items.length - 1);
+    scrollToTimelineItem(next);
+  };
+
+  const jumpToPrevNew = () => {
+    const items = newItems();
+    if (items.length === 0) return;
+    const prev = Math.max(newItemIndex() - 1, 0);
+    scrollToTimelineItem(prev);
   };
 
   const [editingItemId, setEditingItemId] = createSignal<number | null>(null);
@@ -311,6 +441,7 @@ function DiffPage() {
   const [editSubmitting, setEditSubmitting] = createSignal(false);
 
   const startEdit = (item: TimelineItem) => {
+    if (item.kind === "commit" || item.kind === "last-viewed") return;
     const body = item.kind === "comment" ? item.body : (item.body || "");
     setEditingItemId(item.id);
     setEditBody(body);
@@ -732,15 +863,83 @@ function DiffPage() {
             <Show when={token()}>
               <div class="px-3 pb-3 space-y-3">
                 <div class="bg-gray-950 border border-gray-800 rounded-lg p-3 space-y-3">
-                  <h3 class="text-sm font-semibold text-gray-200">
-                    Activity{timeline().length > 0 ? ` (${timeline().length})` : ""}
-                  </h3>
+                  <div class="flex items-center gap-2">
+                    <h3 class="text-sm font-semibold text-gray-200">
+                      Activity{timeline().length > 0 ? ` (${timeline().length})` : ""}
+                    </h3>
+                    <Show when={newItems().length > 0}>
+                      <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-900/50 text-blue-300">
+                        {newItems().length} new
+                      </span>
+                      <div class="flex items-center gap-1 ml-auto">
+                        <button
+                          onClick={jumpToPrevNew}
+                          disabled={newItemIndex() <= 0}
+                          class="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          &uarr;
+                        </button>
+                        <span class="text-[10px] text-gray-500">
+                          {newItemIndex() >= 0 ? `${newItemIndex() + 1}/${newItems().length}` : `0/${newItems().length}`}
+                        </span>
+                        <button
+                          onClick={jumpToNextNew}
+                          disabled={newItemIndex() >= newItems().length - 1}
+                          class="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          &darr;
+                        </button>
+                      </div>
+                    </Show>
+                  </div>
                   <Show when={timeline().length > 0}>
                     <div class="space-y-2">
                       <For each={timeline()}>
-                        {(item) => (
-                          <div class={`bg-gray-950 border rounded-lg px-3 py-2 ${
-                            item.kind === "review" && item.state === "APPROVED"
+                        {(item) => {
+                          if (item.kind === "last-viewed") {
+                            return (
+                              <div class="flex items-center gap-2 py-1">
+                                <div class="flex-1 border-t border-blue-800" />
+                                <span class="text-[10px] font-medium text-blue-400 whitespace-nowrap">Last viewed</span>
+                                <div class="flex-1 border-t border-blue-800" />
+                              </div>
+                            );
+                          }
+                          if (item.kind === "commit") {
+                            const isActive = () => {
+                              const ni = newItems();
+                              const idx = newItemIndex();
+                              return idx >= 0 && ni[idx]?.kind === "commit" && (ni[idx] as any).sha === item.sha;
+                            };
+                            return (
+                              <div id={`timeline-commit-${item.sha}`} class={`flex items-center gap-2 px-3 py-1.5 text-xs rounded transition-colors ${isActive() ? "ring-1 ring-blue-600 bg-blue-950/30" : ""}`}>
+                                <Show when={item.user} fallback={
+                                  <div class="w-4 h-4 rounded-full bg-gray-700 flex items-center justify-center text-[8px] text-gray-400">C</div>
+                                }>
+                                  {(user) => <img src={user().avatar_url} class="w-4 h-4 rounded-full" alt="" />}
+                                </Show>
+                                <span class="text-gray-500 font-mono text-[10px]">{item.sha.slice(0, 7)}</span>
+                                <span class="text-gray-300 truncate flex-1">{item.message}</span>
+                                <span class="text-gray-600 whitespace-nowrap">
+                                  {new Date(item.date).toLocaleDateString(undefined, {
+                                    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+                                  })}
+                                </span>
+                              </div>
+                            );
+                          }
+                          const isActive = () => {
+                            const ni = newItems();
+                            const idx = newItemIndex();
+                            return idx >= 0 && ni[idx]?.kind === item.kind && ni[idx]?.id === item.id;
+                          };
+                          return (
+                          <div
+                            id={`timeline-${item.kind}-${item.id}`}
+                            class={`bg-gray-950 border rounded-lg px-3 py-2 transition-colors ${
+                            isActive()
+                              ? "ring-1 ring-blue-600 bg-blue-950/30"
+                              : item.kind === "review" && item.state === "APPROVED"
                               ? "border-green-900"
                               : item.kind === "review" && item.state === "CHANGES_REQUESTED"
                                 ? "border-red-900"
@@ -807,7 +1006,8 @@ function DiffPage() {
                               </div>
                             </Show>
                           </div>
-                        )}
+                          );
+                        }}
                       </For>
                     </div>
                   </Show>
@@ -859,6 +1059,9 @@ function DiffPage() {
               </button>
               <span class="text-xs text-gray-500">
                 {activeFileIndex() + 1} / {files().length}
+                <Show when={diffMode() === "incremental" && incrementalFiles()}>
+                  {" "}({incrementalFiles()!.length} changed)
+                </Show>
               </span>
               <button
                 onClick={goNextFile}
@@ -868,9 +1071,23 @@ function DiffPage() {
               >
                 Next &rarr;
               </button>
+              <Show when={hasIncrementalData()}>
+                <button
+                  onClick={toggleDiffMode}
+                  disabled={incrementalLoading()}
+                  class={`ml-auto px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                    diffMode() === "incremental"
+                      ? "bg-blue-900/50 border-blue-700 text-blue-300"
+                      : "bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800"
+                  }`}
+                  title="Toggle between full PR diff and changes since last viewed"
+                >
+                  {incrementalLoading() ? "Loading..." : diffMode() === "incremental" ? "Since last view" : "Since last view"}
+                </button>
+              </Show>
             </div>
             <DiffViewer
-              files={files()}
+              files={displayFiles()}
               activeFile={activeFile()}
               owner={params.owner}
               repo={params.repo}
